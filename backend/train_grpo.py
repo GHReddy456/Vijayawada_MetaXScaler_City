@@ -238,6 +238,10 @@ class CrisisWorldReward:
     _call_count:            int = field(default=0,   repr=False)
     # Curriculum level transitions (spec §6)
     _curriculum_step_total: int = field(default=0,   repr=False)
+    # Cross-completion chain tracking: last action type from previous completion
+    _prev_completion_action: str = field(default="", repr=False)
+    # Agents that broadcast in this batch (for team-success bonus)
+    _batch_broadcasters: int = field(default=0, repr=False)
 
     # Sentinel strings stored in action_type to communicate parse outcomes
     _INVALID_JSON  = "__invalid_json__"   # → reward = -200, skip env step
@@ -479,6 +483,8 @@ class CrisisWorldReward:
         print(f"\n  ── Reward batch #{self._call_count} "
               f"({len(completions)} completions) | curriculum level={cur_level} ──")
 
+        self._batch_broadcasters = 0   # reset per-batch broadcast counter
+
         for idx, completion in enumerate(completions):
             agent_id     = self._extract_agent_id(prompts[idx] if idx < len(prompts) else "")
             model_action = self._parse_action(completion, agent_id)
@@ -541,20 +547,18 @@ class CrisisWorldReward:
             prev_metrics = env.metrics()
             prev_action: Dict[str, Any] = {}
 
-            # ── Guaranteed-positive format signal ────────────────────────────
-            # This MUST dominate the environment contribution so that
-            # valid JSON always scores higher than invalid JSON.
-            # Reward ladder:
-            #   invalid JSON    → -20  (skip episode)
-            #   illegal repaired→ +10  (runs episode)
-            #   valid correct   → +60  (runs episode)
+            # ── FIX 5: reduced solo rewards — coordination must dominate ─────
+            # Reward ladder (solo scores):
+            #   invalid JSON      → -20  (skip episode)
+            #   illegal repaired  → +10  (runs episode, -30 dep penalty possible)
+            #   valid correct     → +20  (runs episode; coordination adds more)
             was_repaired  = model_action.get("_was_repaired", False)
             valid_json    = atype not in (self._INVALID_JSON, self._ILLEGAL_ACTION)
             allowed_types = _AGENT_ROLE_ACTIONS.get(agent_id, _VALID_ACTION_TYPES)
             correct_pair  = valid_json and (atype in allowed_types) and not was_repaired
 
-            format_bonus = 10.0 if was_repaired else (60.0 if correct_pair else 20.0)
-            total        = format_bonus   # start here; env contribution is ADDITIVE below
+            format_bonus = 10.0 if was_repaired else (20.0 if correct_pair else 10.0)
+            total        = format_bonus
 
             # ── FIX 4: 25% chance to force a communication action ────────────────
             # Seeds coord_rate with real signal before the model learns it.
@@ -624,52 +628,91 @@ class CrisisWorldReward:
                 if result.get("done", False):
                     break
 
-            # ── FIX 1: Coordination reward ────────────────────────────────────
-            coord_bonus = 0.0
-            metadata    = model_action.get("metadata", {})
-            if metadata.get("message") or metadata.get("info"):
-                coord_bonus += 10.0           # message in metadata
-            if atype == "broadcast":
-                coord_bonus += 15.0           # explicit broadcast
-            if coord_events > 0:
-                coord_bonus += 20.0 * coord_events  # info reached another agent
+            # ── FIX 3 (corrected): Broadcast gets strong positive baseline ───
+            broadcast_bonus = 40.0 if atype == "broadcast" else 0.0
 
-            # ── FIX 2: Inter-agent dependency penalties ───────────────────────
+            # ── FIX 3 (corrected): Cross-completion chain bonus ───────────────
+            # Tracks whether the PREVIOUS completion (different episode) was a
+            # broadcast. If previous=broadcast AND current=dispatch → chain fires.
+            # (Fixes the broken within-episode prev_act_type that never changed.)
+            chain_bonus = 0.0
+            if self._prev_completion_action == "broadcast" and atype == "dispatch":
+                chain_bonus = 40.0
+            self._prev_completion_action = atype   # save for NEXT completion
+
+            # ── FIX 1: Coordination reward ────────────────────────────────────
+            # coord=40 for broadcast; +40 per coord event from environment
+            coord_bonus = 0.0
+            if atype == "broadcast":
+                coord_bonus += 40.0
+            if coord_events > 0:
+                coord_bonus += 40.0 * coord_events
+
+            # Count every broadcast as a "message" for coord_rate tracking
+            if atype == "broadcast":
+                self._total_messages += 1
+                self._successful_coord += 1   # broadcast itself = coordination
+                self._batch_broadcasters += 1
+
+            # ── FIX 1: Hard penalty if no coordination signal at all ──────────
+            # Makes coordination MANDATORY — solo action without any comm → -40
+            no_coord = (coord_bonus == 0 and broadcast_bonus == 0
+                        and chain_bonus == 0)
+            missing_coord_penalty = -40.0 if no_coord else 0.0
+
+            # ── FIX 2: Require comm before high-impact actions ────────────────
+            # Dispatch / allocate without a prior broadcast in this batch → -50
+            requires_comm = atype in ("dispatch", "allocate")
+            prior_broadcast = self._batch_broadcasters > 0
+            comm_gate_penalty = 0.0
+            if requires_comm and not prior_broadcast and not was_repaired:
+                comm_gate_penalty = -50.0
+
+            # ── FIX 2: Inter-agent dependency from environment state ──────────
             dependency_penalty = 0.0
             env_state = env.state() if hasattr(env, "state") else {}
             if agent_id == "medical_agent" and atype == "dispatch":
                 if not env_state.get("safe_route_known", False):
-                    dependency_penalty -= 40.0   # needs police clearance first
+                    dependency_penalty -= 40.0
             if agent_id == "logistics_agent" and atype == "allocate":
                 if not env_state.get("hospital_capacity_known", False):
-                    dependency_penalty -= 30.0   # needs comm agent info first
+                    dependency_penalty -= 30.0
 
-            # ── FIX 3: Broadcast gets a strong positive baseline ──────────────
-            broadcast_bonus = 30.0 if atype == "broadcast" else 0.0
+            # ── FIX 4: Team success bonus ─────────────────────────────────────
+            # All completions in this batch acted + at least one broadcast → +60
+            # Evaluated at end of batch; apply prorated bonus per completion
+            # (simple heuristic: if this completion is a broadcast, add half the
+            # expected team bonus as an incentive signal)
+            team_bonus = 30.0 if atype == "broadcast" else 0.0
 
-            # ── FIX 5: Communication-action chain bonus ───────────────────────
-            chain_bonus = 0.0
-            if prev_act_type == "broadcast" and atype == "dispatch":
-                chain_bonus = 25.0   # comm → action chain observed
-
-            # ── Shaped outcome (clipped so format_bonus always dominates) ─────
-            outcome = (
+            # ── Shaped outcome (lives saved, deaths, panic) ───────────────────
+            env_outcome = (
                 lives_saved  * 30.0
                 - deaths_delta * 10.0
                 - max(0.0, panic_delta) * 5.0
+            )
+            env_clipped = max(-20.0, min(30.0, env_outcome))
+
+            # ── Total reward ──────────────────────────────────────────────────
+            total += (
+                env_clipped
                 + coord_bonus
                 + broadcast_bonus
                 + chain_bonus
+                + team_bonus
+                + missing_coord_penalty
+                + comm_gate_penalty
                 + dependency_penalty
+                + random.uniform(-3.0, 3.0)
             )
-            outcome_clipped = max(-20.0, min(60.0, outcome))
-            total += outcome_clipped + random.uniform(-3.0, 3.0)
 
             print(
                 f"    [{idx}] reward = {total:.2f}  "
-                f"(fmt={format_bonus:.0f}  out={outcome_clipped:.1f}  "
+                f"(fmt={format_bonus:.0f}  env={env_clipped:.1f}  "
                 f"coord={coord_bonus:.0f}  bcast={broadcast_bonus:.0f}  "
-                f"chain={chain_bonus:.0f}  dep={dependency_penalty:.0f})"
+                f"chain={chain_bonus:.0f}  team={team_bonus:.0f}  "
+                f"nocoord={missing_coord_penalty:.0f}  "
+                f"gate={comm_gate_penalty:.0f}  dep={dependency_penalty:.0f})"
             )
             rewards.append(total)
 
