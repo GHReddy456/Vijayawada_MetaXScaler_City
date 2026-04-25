@@ -47,7 +47,7 @@ SAMPLING_KWARGS: Dict[str, Any] = {
     "top_p":              0.9,    # spec §4
     "repetition_penalty": 1.1,    # prevents repetitive JSON loops
 }
-MAX_NEW_TOKENS = 48   # spec §4: shorter → less clipping → higher JSON validity rate
+MAX_NEW_TOKENS = 96   # 48 was too tight — minimal JSON is ~20-30 tokens; 96 gives headroom
 
 # Temperature can be bumped dynamically when reward_std is too low (spec §2 guard)
 _dynamic_temperature: float = SAMPLING_KWARGS["temperature"]
@@ -56,22 +56,35 @@ _dynamic_temperature: float = SAMPLING_KWARGS["temperature"]
 # ─── Observation → prompt ─────────────────────────────────────────────────────
 
 _STRICT_SYSTEM_PROMPT = """\
-You are a CrisisWorld agent. Output ONLY JSON matching this exact schema:
+You are a CrisisWorld agent. Output ONLY a single compact JSON object on ONE line.
 
-{
-  "agent_id": "<medical|police|logistics|communication|commander>",
-  "action_type": "<dispatch|route|block|allocate|broadcast>",
-  "target": [x, y],
-  "metadata": {"reason": "<short reason>"}
-}
+Format: {"agent_id":"<id>","action_type":"<type>","target":[x,y],"metadata":{"reason":"<why>"}}
 
-RULES (violations are penalised -200):
-- No prose. No markdown. JSON only.
-- target must be two integers each 0-9.
-- action_type must be one of: dispatch, route, block, allocate, broadcast.
-- Do NOT wrap in ```json ... ```."""
+Role actions (use ONLY these for your role):
+  medical_agent       → dispatch, route, allocate, broadcast
+  police_agent        → dispatch, route, block, broadcast, secure
+  logistics_agent     → dispatch, route, allocate, broadcast
+  communication_agent → broadcast, route
+  commander_agent     → dispatch, route, block, allocate, broadcast, secure
+
+RULES (violations penalised -200):
+- Single line. No prose. No markdown. No ```json```. JSON only.
+- target: two integers 0-9.
+- Use ONLY the action_types listed for YOUR role."""
 
 _VALID_ACTION_TYPES = {"dispatch", "route", "block", "allocate", "broadcast"}
+
+# Per-agent allowed actions — prevents reward-hacking via illegal-but-cheap actions
+# e.g. medical_agent outputting "block" used to score -25 (env exception → break)
+# which the model exploited as a consistently low-cost fallback.
+_AGENT_ROLE_ACTIONS: Dict[str, set] = {
+    "medical_agent":        {"dispatch", "route", "allocate", "broadcast"},
+    "police_agent":         {"dispatch", "route", "block",    "broadcast", "secure"},
+    "logistics_agent":      {"dispatch", "route", "allocate", "broadcast"},
+    "communication_agent":  {"broadcast", "route"},
+    "commander_agent":      {"dispatch", "route", "block",    "allocate",
+                             "broadcast", "secure"},
+}
 
 
 def observation_to_prompt(observation: Dict[str, Any], agent_id: str) -> str:
@@ -116,12 +129,12 @@ def build_prompt_dataset(samples: int = 256, level: int = 2, seed: int = 123) ->
 # ─── PART 3: Stochastic fallback action (no static [5,5]) ────────────────────
 
 def _stochastic_fallback(agent_id: str) -> Dict[str, Any]:
-    """Random fallback so identical-text completions still get varied rewards."""
-    action_types = ["dispatch", "route", "secure", "allocate", "block"]
+    """Random fallback so identical-text completions still get varied rewards.
+    Uses per-agent allowed actions to avoid cheap-penalty exploits."""
+    allowed = list(_AGENT_ROLE_ACTIONS.get(agent_id, _VALID_ACTION_TYPES))
     return {
         "agent_id":    agent_id,
-        "action_type": random.choice(action_types),
-        # PART 3: random target, not hardcoded [5,5]
+        "action_type": random.choice(allowed),
         "target":      [random.randint(0, 9), random.randint(0, 9)],
         "metadata":    {"reason": "stochastic_fallback"},
     }
@@ -172,6 +185,36 @@ class CrisisWorldReward:
     _json_valid_count:   int = field(default=0, repr=False)
     _json_invalid_count: int = field(default=0, repr=False)
 
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        """
+        Brace-balanced extractor: finds the FIRST complete {...} object in text.
+        This avoids rfind("}")+1 picking up garbage appended after EOS padding.
+        """
+        start = text.find("{")
+        if start == -1:
+            return ""
+        depth = 0
+        in_str = False
+        escape = False
+        for i, ch in enumerate(text[start:], start):
+            if escape:
+                escape = False
+                continue
+            if ch == "\\" and in_str:
+                escape = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+            if not in_str:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start : i + 1]
+        return ""
+
     def _parse_action(self, text: str, agent_id: str) -> Dict[str, Any]:
         """
         Spec §1 hard validation:
@@ -179,37 +222,39 @@ class CrisisWorldReward:
           - Wrong action_type/coord → sentinel __illegal__       (−120)
           - Valid                   → return action dict
         """
-        # Strip markdown fences if model wrapped output
+        _bad_json    = {"agent_id": agent_id, "action_type": self._INVALID_JSON,
+                        "target": [5, 5], "metadata": {"reason": "no_json_found"}}
+        _bad_action  = lambda r: {"agent_id": agent_id, "action_type": self._ILLEGAL_ACTION,
+                                  "target": [5, 5], "metadata": {"reason": r}}
+
+        # Strip markdown fences
         cleaned = text.strip()
         for fence in ("```json", "```"):
             if cleaned.startswith(fence):
                 cleaned = cleaned[len(fence):]
         cleaned = cleaned.rstrip("`").strip()
 
-        # Extract first {...} block
-        start = cleaned.find("{")
-        end   = cleaned.rfind("}") + 1
-        if start < 0 or end <= start:
-            return {"agent_id": agent_id, "action_type": self._INVALID_JSON,
-                    "target": [5, 5], "metadata": {"reason": "no_json_found"}}
+        # Extract FIRST complete {...} block (brace-balanced, not rfind)
+        json_str = self._extract_first_json_object(cleaned)
+        if not json_str:
+            return _bad_json
 
         try:
-            action = json.loads(cleaned[start:end])
+            action = json.loads(json_str)
         except Exception:
             return {"agent_id": agent_id, "action_type": self._INVALID_JSON,
                     "target": [5, 5], "metadata": {"reason": "json_parse_error"}}
 
         if not isinstance(action, dict):
-            return {"agent_id": agent_id, "action_type": self._INVALID_JSON,
-                    "target": [5, 5], "metadata": {"reason": "not_a_dict"}}
+            return _bad_json
 
         action["agent_id"] = agent_id
 
-        # Validate action_type
-        atype = action.get("action_type", "")
-        if atype not in _VALID_ACTION_TYPES:
-            return {"agent_id": agent_id, "action_type": self._ILLEGAL_ACTION,
-                    "target": [5, 5], "metadata": {"reason": f"bad_action_type:{atype}"}}
+        # Validate action_type against agent-specific allowed actions
+        atype           = action.get("action_type", "")
+        allowed_actions = _AGENT_ROLE_ACTIONS.get(agent_id, _VALID_ACTION_TYPES)
+        if atype not in allowed_actions:
+            return _bad_action(f"bad_action_type:{atype} not allowed for {agent_id}")
 
         # Validate + clamp target
         tgt = action.get("target", [])
@@ -218,20 +263,26 @@ class CrisisWorldReward:
             or len(tgt) != 2
             or not all(isinstance(v, (int, float)) for v in tgt)
         ):
-            return {"agent_id": agent_id, "action_type": self._ILLEGAL_ACTION,
-                    "target": [5, 5], "metadata": {"reason": "bad_target"}}
+            return _bad_action("bad_target")
 
         action["target"] = [int(max(0, min(9, tgt[0]))), int(max(0, min(9, tgt[1])))]
         return action
 
     def _extract_agent_id(self, prompt: str) -> str:
-        marker = "agent_id must be '"
-        start  = prompt.find(marker)
-        if start == -1:
-            return "medical_agent"
-        start += len(marker)
-        end    = prompt.find("'", start)
-        return prompt[start:end] if end > start else "medical_agent"
+        # New prompt format: agent_id: "medical_agent"
+        for marker, quote in [('agent_id: "', '"'), ("agent_id: '", "'")]:
+            start = prompt.find(marker)
+            if start != -1:
+                start += len(marker)
+                end = prompt.find(quote, start)
+                if end > start:
+                    return prompt[start:end]
+        # Fallback: look for known agent ids directly in the prompt
+        for aid in ("commander_agent", "communication_agent", "logistics_agent",
+                    "police_agent", "medical_agent"):
+            if aid in prompt:
+                return aid
+        return "medical_agent"
 
     @staticmethod
     def _step_reward(
