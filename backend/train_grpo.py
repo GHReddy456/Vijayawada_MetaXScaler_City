@@ -47,7 +47,7 @@ SAMPLING_KWARGS: Dict[str, Any] = {
     "top_p":              0.9,    # spec §4
     "repetition_penalty": 1.1,    # prevents repetitive JSON loops
 }
-MAX_NEW_TOKENS = 96   # 48 was too tight — minimal JSON is ~20-30 tokens; 96 gives headroom
+MAX_NEW_TOKENS = 32   # compact JSON needs ~15-20 tokens; 32 prevents drift into garbage
 
 # Temperature can be bumped dynamically when reward_std is too low (spec §2 guard)
 _dynamic_temperature: float = SAMPLING_KWARGS["temperature"]
@@ -56,21 +56,27 @@ _dynamic_temperature: float = SAMPLING_KWARGS["temperature"]
 # ─── Observation → prompt ─────────────────────────────────────────────────────
 
 _STRICT_SYSTEM_PROMPT = """\
-You are a CrisisWorld agent. Output ONLY a single compact JSON object on ONE line.
+You are a CrisisWorld disaster-response agent.
 
-Format: {"agent_id":"<id>","action_type":"<type>","target":[x,y],"metadata":{"reason":"<why>"}}
+OUTPUT: one JSON object, single line, no explanation, no markdown.
 
-Role actions (use ONLY these for your role):
+EXAMPLE (copy this exact structure):
+{"agent_id":"medical_agent","action_type":"dispatch","target":[4,5],"metadata":{}}
+
+ALLOWED agent_ids:
+["medical_agent","police_agent","logistics_agent","communication_agent","commander_agent"]
+
+ALLOWED action_types per role:
   medical_agent       → dispatch, route, allocate, broadcast
   police_agent        → dispatch, route, block, broadcast, secure
   logistics_agent     → dispatch, route, allocate, broadcast
   communication_agent → broadcast, route
   commander_agent     → dispatch, route, block, allocate, broadcast, secure
 
-RULES (violations penalised -200):
-- Single line. No prose. No markdown. No ```json```. JSON only.
-- target: two integers 0-9.
-- Use ONLY the action_types listed for YOUR role."""
+RULES:
+- Use ONLY the action_types listed for YOUR agent_id above.
+- target must be exactly [x,y] where x and y are integers 0-9.
+- No prose. No triple-backticks. JSON only."""
 
 _VALID_ACTION_TYPES = {"dispatch", "route", "block", "allocate", "broadcast"}
 
@@ -88,26 +94,36 @@ _AGENT_ROLE_ACTIONS: Dict[str, set] = {
 
 
 def observation_to_prompt(observation: Dict[str, Any], agent_id: str) -> str:
-    visible     = observation.get("visible_events", [])
-    messages    = observation.get("messages", [])
-    resources   = observation.get("resource_status", {})
-    uncertainty = observation.get("uncertainty", {})
-    scope = (
-        observation.get("agent_status", {})
-        .get("self", {})
-        .get("knowledge_scope", "")
+    visible   = observation.get("visible_events", [])
+    messages  = observation.get("messages", [])
+    resources = observation.get("resource_status", {})
+
+    # Pick a valid example action_type for this agent so the in-context example
+    # already shows the correct role → the model just needs to copy the structure.
+    example_action = next(iter(_AGENT_ROLE_ACTIONS.get(agent_id, {"dispatch"})))
+    example_json   = (
+        f'{{"agent_id":"{agent_id}",'
+        f'"action_type":"{example_action}",'
+        f'"target":[4,5],"metadata":{{}}}}'
     )
+
+    # Keep the observation section short to leave more token budget for the output.
+    obs_summary = (
+        f"events={json.dumps(visible[:3])} "
+        f"resources={json.dumps(resources)} "
+        f"messages={json.dumps(messages[:2])}"
+    )
+
     lines = [
         _STRICT_SYSTEM_PROMPT,
         "",
-        f"agent_id: \"{agent_id}\"",
-        f"Knowledge scope: {scope}",
-        f"Uncertainty: {json.dumps(uncertainty)}",
-        f"Events ({len(visible)}): {json.dumps(visible[:4])}",
-        f"Messages ({len(messages)}): {json.dumps(messages[:3])}",
-        f"Resources: {json.dumps(resources)}",
+        f"Your agent_id: \"{agent_id}\"",
+        f"Example for your role: {example_json}",
         "",
-        "Respond with JSON only:",
+        "Observation:",
+        obs_summary,
+        "",
+        "Your JSON response:",
     ]
     return "\n".join(lines)
 
@@ -138,6 +154,53 @@ def _stochastic_fallback(agent_id: str) -> Dict[str, Any]:
         "target":      [random.randint(0, 9), random.randint(0, 9)],
         "metadata":    {"reason": "stochastic_fallback"},
     }
+
+
+def fix_action(action: Dict[str, Any], agent_id: str) -> Dict[str, Any]:
+    """
+    FIX 3 — Post-processing corrector.
+    Silently repairs action fields that are almost-valid rather than
+    hard-penalising and discarding the episode entirely.
+
+    Repairs applied:
+      • agent_id missing / unknown  → set to known agent_id from the prompt
+      • action_type not in agent's allowed set → nearest allowed action
+        (keeps action family: dispatch→dispatch if available, else first allowed)
+      • target out of range or wrong type → clamp to [0-9, 0-9]
+
+    Returns the repaired action dict.  Callers should check the returned
+    `_was_repaired` flag to decide whether to apply a small correction penalty.
+    """
+    _KNOWN_AGENTS = set(_AGENT_ROLE_ACTIONS.keys())
+
+    # Fix agent_id
+    if action.get("agent_id") not in _KNOWN_AGENTS:
+        action["agent_id"] = agent_id
+    effective_agent = action["agent_id"]
+
+    # Fix action_type
+    allowed = _AGENT_ROLE_ACTIONS.get(effective_agent, _VALID_ACTION_TYPES)
+    atype   = action.get("action_type", "")
+    if atype not in allowed:
+        # Prefer same action_type if it exists for this role, else first allowed
+        if atype in _VALID_ACTION_TYPES and atype in allowed:
+            pass  # already fine (shouldn't reach here)
+        else:
+            action["action_type"] = sorted(allowed)[0]   # deterministic fallback
+        action["_was_repaired"] = True
+    else:
+        action.setdefault("_was_repaired", False)
+
+    # Fix target
+    tgt = action.get("target", [])
+    try:
+        x, y = int(tgt[0]), int(tgt[1])
+        action["target"] = [max(0, min(9, x)), max(0, min(9, y))]
+    except Exception:
+        action["target"]      = [random.randint(0, 9), random.randint(0, 9)]
+        action["_was_repaired"] = True
+
+    return action
 
 
 # ─── Reward function ──────────────────────────────────────────────────────────
@@ -431,17 +494,15 @@ class CrisisWorldReward:
                 continue
 
             if atype == self._ILLEGAL_ACTION:
-                self._json_invalid_count += 1
-                penalty = -120.0 + random.uniform(-2.0, 2.0)
-                print(f"    [{idx}] ⚠ ILLEGAL ACTION → reward={penalty:.1f}")
-                rewards.append(penalty)
-                self.episode_rewards.append(penalty)
-                self.episode_deaths.append(0)
-                self.episode_coordination.append(0.0)
-                self.episode_trust.append(0.0)
-                self.episode_panic.append(0.0)
-                self._curriculum_step_total += 1
-                continue
+                # FIX 3+4: repair the action and still run the episode.
+                # Reduced hard penalty (-40) so the model isn't stuck in
+                # "everything is equally catastrophic" territory.
+                model_action = fix_action(model_action, agent_id)
+                model_action["_was_repaired"] = True
+                atype = model_action["action_type"]
+                self._json_invalid_count += 1   # still counts as format miss
+                print(f"    [{idx}] ⚠ ILLEGAL ACTION → repaired to "
+                      f"{atype}  (penalty -40 applied)")
 
             self._json_valid_count += 1
 
@@ -458,6 +519,23 @@ class CrisisWorldReward:
             total        = 0.0
             prev_metrics = env.metrics()
             prev_action: Dict[str, Any] = {}
+
+            # FIX 4: small correction penalty for repaired illegal actions
+            # (-40 instead of the old hard -120 abort) — episode still runs,
+            # so the model gets gradient from the outcome, not just the format.
+            if model_action.get("_was_repaired"):
+                total -= 40.0
+
+            # FIX 5: positive signal for producing a structurally valid action
+            # (parsed cleanly, action_type in allowed set, target in range)
+            was_repaired  = model_action.get("_was_repaired", False)
+            valid_json    = atype not in (self._INVALID_JSON, self._ILLEGAL_ACTION)
+            allowed_types = _AGENT_ROLE_ACTIONS.get(agent_id, _VALID_ACTION_TYPES)
+            correct_pair  = valid_json and (atype in allowed_types) and not was_repaired
+            if valid_json:
+                total += 10.0    # reward for outputting parseable JSON at all
+            if correct_pair:
+                total += 15.0    # reward for using the right action for this role
 
             for step_idx in range(self.horizon):
                 joint: Dict[str, Any] = {}
