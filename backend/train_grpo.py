@@ -48,7 +48,7 @@ SAMPLING_KWARGS: Dict[str, Any] = {
     "top_p":              0.9,    # spec §4
     "repetition_penalty": 1.1,    # prevents repetitive JSON loops
 }
-MAX_NEW_TOKENS = 48   # prefix-forced: model only outputs ~15-20 tokens of JSON suffix
+MAX_NEW_TOKENS = 64   # few-shot prompt: model generates full JSON from scratch (~25-35 tokens)
 
 # Temperature can be bumped dynamically when reward_std is too low (spec §2 guard)
 _dynamic_temperature: float = SAMPLING_KWARGS["temperature"]
@@ -101,14 +101,13 @@ _AGENT_ROLE_ACTIONS: Dict[str, set] = {
 
 
 def _json_prefix(agent_id: str) -> str:
-    """Prefix-forcing: prompt ends here, model generates the JSON suffix."""
+    """Used by the multi-strategy parser (Strategy 2) for prefix reconstruction."""
     return f'{{"agent_id":"{agent_id}","action_type":"'
 
 
 def _sample_target_from_obs(observation: Dict[str, Any]) -> List[int]:
-    """FIX 3: sample a meaningful target from visible events rather than [5,5]."""
-    events = observation.get("visible_events", [])
-    for ev in events[:4]:
+    """Sample a meaningful target from visible events rather than always [5,5]."""
+    for ev in observation.get("visible_events", [])[:4]:
         loc = ev.get("location") or ev.get("position")
         if isinstance(loc, (list, tuple)) and len(loc) == 2:
             try:
@@ -117,33 +116,42 @@ def _sample_target_from_obs(observation: Dict[str, Any]) -> List[int]:
                     return [x, y]
             except (TypeError, ValueError):
                 pass
-    # No usable event location — random but NOT always [5,5]
-    return [random.randint(0, 9), random.randint(0, 9)]
+    return [random.randint(1, 8), random.randint(1, 8)]   # diverse non-[5,5] default
 
 
 def observation_to_prompt(observation: Dict[str, Any], agent_id: str) -> str:
-    visible   = observation.get("visible_events", [])
-    resources = observation.get("resource_status", {})
-
-    # FIX 3: show a meaningful suggested target so model doesn't blindly use [5,5]
-    suggested = _sample_target_from_obs(observation)
+    visible    = observation.get("visible_events", [])
+    resources  = observation.get("resource_status", {})
+    suggested  = _sample_target_from_obs(observation)
     events_str = json.dumps(visible[:2])
     res_str    = json.dumps({k: v for k, v in list(resources.items())[:3]})
-
     role_desc  = _ROLE_INSTRUCTIONS.get(agent_id, "You are a CrisisWorld agent.")
-    allowed    = ", ".join(sorted(_AGENT_ROLE_ACTIONS.get(agent_id, _VALID_ACTION_TYPES)))
+    allowed    = sorted(_AGENT_ROLE_ACTIONS.get(agent_id, _VALID_ACTION_TYPES))
+    # Pick a different example action each call so model doesn't memorise one
+    ex_action  = random.choice(allowed)
+    ex_target  = [random.randint(1, 8), random.randint(1, 8)]
 
-    # FIX 1+2: strict format + role-specific context + prefix-forcing
+    # Few-shot example — model copies this structure, fills in the right values.
+    # NO prefix-forcing: model generates the full JSON from scratch.
+    # The example shows it exactly what the output must look like.
+    example = (
+        f'{{"agent_id":"{agent_id}",'
+        f'"action_type":"{ex_action}",'
+        f'"target":[{ex_target[0]},{ex_target[1]}],'
+        f'"metadata":{{}}}}'
+    )
+
     prompt = (
         f"{role_desc}\n\n"
-        f"agent_id={agent_id}  |  valid actions: {allowed}\n"
-        f"RULES: output ONLY JSON | target must be [x,y] within 0-9 "
-        f"| choose target from events, NOT always [5,5] | no text outside JSON\n\n"
+        f"Your role: {agent_id}\n"
+        f"Valid action_types for your role: {', '.join(allowed)}\n\n"
+        f"EXAMPLE of correct output (copy this exact structure):\n"
+        f"{example}\n\n"
+        f"Current situation:\n"
         f"Events: {events_str}\n"
         f"Resources: {res_str}\n"
         f"Suggested target: {suggested}\n\n"
-        f"Output JSON:\n"
-        f"{_json_prefix(agent_id)}"  # model continues from here
+        f"Output your JSON action now:\n"
     )
     return prompt
 
