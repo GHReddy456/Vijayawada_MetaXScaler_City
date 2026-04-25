@@ -1,0 +1,59 @@
+# ── Node / Frontend ──────────────────────────────────────────────────────────
+node_modules/
+dist/
+.vite/
+*.local
+
+# ── Python / Backend ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+.eggs/
+*.egg
+.mypy_cache/
+.pytest_cache/
+*.pyc
+
+# ── Model weights (upload separately after Colab training) ───────────────────
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.gguf
+*.ggml
+models/
+weights/
+checkpoints/
+runs/
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+.env.*
+*.key
+secrets.json
+credentials.json
+
+# ── OS / Editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Benchmark / test artifacts ────────────────────────────────────────────────
+benchmark_results.json
+_llm_test.py
+_verify_*.py
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/

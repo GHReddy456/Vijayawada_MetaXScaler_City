@@ -1,0 +1,135 @@
+/* ─────────────────────────────────────────────────────────
+   MetaX Scaler — Vijayawada AI Command Center
+   Global CSS  |  Dark #0B1220 | Glassmorphism | Neon
+───────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg-deep:       #060d1a;
+  --bg-base:       #0B1220;
+  --bg-panel:      rgba(10, 18, 36, 0.82);
+  --bg-glass:      rgba(15, 28, 55, 0.65);
+  --border-subtle: rgba(80, 120, 220, 0.14);
+  --border-glow:   rgba(0, 180, 255, 0.25);
+
+  --cyan:    #00d4ff;
+  --green:   #00ff88;
+  --red:     #ff3355;
+  --orange:  #ff9500;
+  --purple:  #bb44ff;
+  --blue:    #3388ff;
+  --yellow:  #ffcc00;
+
+  --text-primary:   #e2eaf8;
+  --text-secondary: #7a9ac0;
+  --text-muted:     #3a5070;
+
+  --font-ui:   'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+html, body, #root {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: rgba(10,20,40,0.4); }
+::-webkit-scrollbar-thumb { background: rgba(0,180,255,0.25); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,180,255,0.45); }
+
+/* ── Glass Panel ── */
+.glass {
+  background: var(--bg-panel);
+  backdrop-filter: blur(18px) saturate(1.4);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+}
+
+/* ── Neon glow utilities ── */
+.glow-cyan   { text-shadow: 0 0 10px var(--cyan),   0 0 30px rgba(0,212,255,0.3); }
+.glow-green  { text-shadow: 0 0 10px var(--green),  0 0 30px rgba(0,255,136,0.3); }
+.glow-red    { text-shadow: 0 0 10px var(--red),    0 0 30px rgba(255,51,85,0.3); }
+.glow-orange { text-shadow: 0 0 10px var(--orange), 0 0 30px rgba(255,149,0,0.3); }
+
+/* ── Animated dashed path ── */
+@keyframes dash-flow {
+  to { stroke-dashoffset: -24; }
+}
+.path-animate {
+  animation: dash-flow 0.8s linear infinite;
+}
+
+/* ── Pulse ring ── */
+@keyframes pulse-ring {
+  0%   { transform: scale(0.85); opacity: 0.7; }
+  50%  { transform: scale(1.15); opacity: 0.3; }
+  100% { transform: scale(0.85); opacity: 0.7; }
+}
+.pulse-ring {
+  animation: pulse-ring 2.5s ease-in-out infinite;
+}
+
+/* ── Scanline overlay ── */
+.scanlines::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.04) 2px,
+    rgba(0,0,0,0.04) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ── Progress bars ── */
+.bar-track {
+  width: 100%; height: 4px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.8s cubic-bezier(0.4,0,0.2,1);
+}
+
+/* ── Typography ── */
+.label-xs { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-secondary); }
+.label-sm { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary); }
+.mono     { font-family: var(--font-mono); }
+
+/* ── Severity badge ── */
+.badge {
+  display: inline-flex; align-items: center;
+  padding: 1px 8px; border-radius: 4px;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+}
+.badge-high     { background: rgba(255,51,85,0.15);  color: var(--red);    border: 1px solid rgba(255,51,85,0.3); }
+.badge-medium   { background: rgba(255,149,0,0.15);  color: var(--orange); border: 1px solid rgba(255,149,0,0.3); }
+.badge-low      { background: rgba(0,255,136,0.12);  color: var(--green);  border: 1px solid rgba(0,255,136,0.25); }
+.badge-critical { background: rgba(187,68,255,0.15); color: var(--purple); border: 1px solid rgba(187,68,255,0.3); }
+
+/* ── Connection indicator ── */
+@keyframes blink { 50% { opacity: 0; } }
+.blink { animation: blink 1s step-end infinite; }
+
+/* ── Agent card hover ── */
+.agent-card {
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+}
+.agent-card:hover {
+  background: rgba(0, 180, 255, 0.08);
+  border-color: rgba(0, 180, 255, 0.35);
+  box-shadow: 0 0 20px rgba(0, 180, 255, 0.12) inset;
+}
