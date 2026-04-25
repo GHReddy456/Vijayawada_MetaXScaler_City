@@ -488,7 +488,7 @@ class GRPODebugCallback:
 
 def train(
     model_name:                  str   = DEFAULT_MODEL,
-    output_dir:                  str   = "checkpoints/crisisworld-grpo",
+    output_dir:                  str   = "checkpoints/crisisworld-grpo-500",
     samples:                     int   = 256,
     level:                       int   = 2,
     horizon:                     int   = 20,
@@ -623,7 +623,7 @@ def train(
     print(f"[train] max_steps=500 · save every 50 steps · auto-resume enabled\n")
 
     # Step 3: resume from checkpoint if one exists (safe for Colab disconnects)
-    trainer.train(resume_from_checkpoint=True)
+    trainer.train()
 
     # Step 4: save two copies — rolling checkpoint dir + explicit final dir
     final_dir = output_dir.rstrip("/") + "-final"
@@ -710,7 +710,7 @@ def _save_artifacts(
 # ─── Artifact loader (used by server.py) ─────────────────────────────────────
 
 def load_training_artifacts(
-    output_dir: str = "checkpoints/crisisworld-grpo",
+    output_dir: str = "checkpoints/crisisworld-grpo-500",
 ) -> Dict[str, Any]:
     out = Path(output_dir)
     payload: Dict[str, Any] = {"output_dir": output_dir, "available": {}}
