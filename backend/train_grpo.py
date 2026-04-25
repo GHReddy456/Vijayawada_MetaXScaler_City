@@ -48,7 +48,7 @@ SAMPLING_KWARGS: Dict[str, Any] = {
     "top_p":              0.9,    # spec §4
     "repetition_penalty": 1.1,    # prevents repetitive JSON loops
 }
-MAX_NEW_TOKENS = 32   # keep short — soft prompt + regex extractor handle truncation
+MAX_NEW_TOKENS = 48   # prefix-forced: model only outputs ~15-20 tokens of JSON suffix
 
 # Temperature can be bumped dynamically when reward_std is too low (spec §2 guard)
 _dynamic_temperature: float = SAMPLING_KWARGS["temperature"]
@@ -93,29 +93,33 @@ _AGENT_ROLE_ACTIONS: Dict[str, set] = {
 }
 
 
+def _json_prefix(agent_id: str) -> str:
+    """The JSON prefix that ends every prompt.
+    The model only needs to generate the REST of the JSON after this.
+    Example completion for agent_id=medical_agent:
+      dispatch","target":[3,7],"metadata":{}}
+    That is ~15 tokens — well within max_new_tokens=32.
+    """
+    return f'{{"agent_id":"{agent_id}","action_type":"'
+
+
 def observation_to_prompt(observation: Dict[str, Any], agent_id: str) -> str:
     visible   = observation.get("visible_events", [])
-    messages  = observation.get("messages", [])
     resources = observation.get("resource_status", {})
 
-    obs_summary = (
-        f"events: {json.dumps(visible[:3])}\n"
-        f"resources: {json.dumps(resources)}\n"
-        f"messages: {json.dumps(messages[:2])}"
-    )
+    # Keep the context minimal — small model needs short prompts.
+    events_str = json.dumps(visible[:2])
+    res_str    = json.dumps({k: v for k, v in list(resources.items())[:3]})
 
-    # Soft, guided prompt — teaches structure rather than forbidding everything.
-    # agent_id is injected directly so the model knows its role.
+    # End with the JSON prefix so the model just continues completing it.
+    # This is prefix-forcing: eliminates the "where does JSON start?" problem.
     prompt = (
-        f"You are an AI agent in CrisisWorld.\n\n"
-        f"Your agent_id is: {agent_id}\n\n"
-        f"Your job is to choose ONE action.\n\n"
-        f"Respond in JSON format like this:\n\n"
-        f'{{\n  "agent_id": "{agent_id}",\n  "action_type": "dispatch",\n'
-        f'  "target": [x, y],\n  "metadata": {{}}\n}}\n\n'
-        f"Valid actions: dispatch, route, block, allocate, broadcast\n\n"
-        f"Observation:\n{obs_summary}\n\n"
-        f"Action:\n"
+        f"You are a CrisisWorld agent. agent_id={agent_id}\n"
+        f"Valid actions: dispatch, route, block, allocate, broadcast\n"
+        f"Events: {events_str}\n"
+        f"Resources: {res_str}\n"
+        f"Output JSON:\n"
+        f"{_json_prefix(agent_id)}"   # ← model continues from here
     )
     return prompt
 
@@ -243,73 +247,107 @@ class CrisisWorldReward:
     _json_valid_count:   int = field(default=0, repr=False)
     _json_invalid_count: int = field(default=0, repr=False)
 
+    @staticmethod
+    def _try_parse_json(text: str) -> Optional[Dict]:
+        """Attempt JSON parse; return dict or None."""
+        try:
+            obj = json.loads(text)
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+
     def _parse_action(self, text: str, agent_id: str) -> Dict[str, Any]:
         """
-        FIX 2: Robust regex-based JSON extractor.
-        Uses re.search(r"\\{.*\\}", text, re.DOTALL) — tolerant of surrounding
-        prose, markdown fences, or truncated padding.
+        Multi-strategy parser designed for prefix-forced completions.
 
-        Outcomes:
-          - Parseable JSON with valid fields  → return action dict
-          - Parseable JSON with illegal type  → sentinel __illegal__  (−30)
-          - No parseable JSON at all          → sentinel __invalid_json__ (−20)
+        The prompt ends with:  {"agent_id":"X","action_type":"
+        So the model completion is something like:
+            dispatch","target":[3,7],"metadata":{}}
+
+        Three extraction strategies (tried in order):
+          1. Direct regex: find any complete {…} block in the text
+          2. Prefix reconstruction: prepend _json_prefix(agent_id) + text
+          3. Field extraction: pull action_type and target with individual regexes
         """
         _bad_json   = {"agent_id": agent_id, "action_type": self._INVALID_JSON,
-                       "target": [5, 5], "metadata": {"reason": "no_json_found"}}
+                       "target": [5, 5], "metadata": {}}
         _bad_action = lambda r: {"agent_id": agent_id, "action_type": self._ILLEGAL_ACTION,
                                  "target": [5, 5], "metadata": {"reason": r}}
 
-        # Strip markdown fences
-        cleaned = text.strip()
-        for fence in ("```json", "```"):
-            if cleaned.startswith(fence):
-                cleaned = cleaned[len(fence):]
-        cleaned = cleaned.rstrip("`").strip()
+        cleaned = text.strip().lstrip("`").rstrip("`").strip()
 
-        # Regex extraction: greedy match from first { to last }
         action: Optional[Dict] = None
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+
+        # ── Strategy 1: direct JSON block ────────────────────────────────────
+        match = re.search(r"\{[^{}]*\}", cleaned, re.DOTALL)
         if match:
-            try:
-                action = json.loads(match.group())
-            except Exception:
-                action = None
+            action = self._try_parse_json(match.group())
+
+        # ── Strategy 2: prefix reconstruction ────────────────────────────────
+        # The prompt ended with {"agent_id":"X","action_type":" and the model
+        # completed the rest.  Glue them back together and parse.
+        if action is None:
+            reconstructed = _json_prefix(agent_id) + cleaned
+            # Find the first complete {...} in the reconstructed string
+            match2 = re.search(r"\{[^{}]*\}", reconstructed, re.DOTALL)
+            if match2:
+                action = self._try_parse_json(match2.group())
+            if action is None:
+                # Also try the whole reconstructed string up to first }
+                end = reconstructed.find("}")
+                if end != -1:
+                    action = self._try_parse_json(reconstructed[: end + 1])
+
+        # ── Strategy 3: field-by-field extraction ────────────────────────────
+        # Works for partial/malformed JSON as long as key fields are present.
+        if action is None:
+            # Search both in cleaned and in prefix+cleaned
+            search_text = _json_prefix(agent_id) + cleaned
+            at_m  = re.search(r'"action_type"\s*:\s*"(\w+)"', search_text)
+            tgt_m = re.search(r'"target"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]', search_text)
+            if at_m:
+                action = {
+                    "agent_id":   agent_id,
+                    "action_type": at_m.group(1),
+                    "target":     ([int(tgt_m.group(1)), int(tgt_m.group(2))]
+                                   if tgt_m else [5, 5]),
+                    "metadata":   {},
+                }
 
         if action is None or not isinstance(action, dict):
             return _bad_json
 
         action["agent_id"] = agent_id
 
-        # Validate action_type against agent-specific allowed actions
-        atype           = action.get("action_type", "")
+        # Validate action_type
+        atype           = str(action.get("action_type", ""))
         allowed_actions = _AGENT_ROLE_ACTIONS.get(agent_id, _VALID_ACTION_TYPES)
         if atype not in allowed_actions:
-            return _bad_action(f"bad_action_type:{atype} not allowed for {agent_id}")
+            return _bad_action(f"bad_action_type:{atype}")
 
         # Validate + clamp target
         tgt = action.get("target", [])
-        if (
-            not isinstance(tgt, list)
-            or len(tgt) != 2
-            or not all(isinstance(v, (int, float)) for v in tgt)
-        ):
+        try:
+            action["target"] = [int(max(0, min(9, tgt[0]))),
+                                 int(max(0, min(9, tgt[1])))]
+        except Exception:
             return _bad_action("bad_target")
 
-        action["target"] = [int(max(0, min(9, tgt[0]))), int(max(0, min(9, tgt[1])))]
         return action
 
     def _extract_agent_id(self, prompt: str) -> str:
-        # New prompt format: agent_id: "medical_agent"
-        for marker, quote in [('agent_id: "', '"'), ("agent_id: '", "'")]:
-            start = prompt.find(marker)
-            if start != -1:
-                start += len(marker)
-                end = prompt.find(quote, start)
-                if end > start:
-                    return prompt[start:end]
-        # Fallback: look for known agent ids directly in the prompt
-        for aid in ("commander_agent", "communication_agent", "logistics_agent",
-                    "police_agent", "medical_agent"):
+        # New prompt format: "agent_id=medical_agent" or {"agent_id":"medical_agent"
+        for pattern in [
+            r'agent_id=(\w+)',
+            r'"agent_id"\s*:\s*"(\w+)"',
+            r"agent_id: ['\"](\w+)['\"]",
+        ]:
+            m = re.search(pattern, prompt)
+            if m and m.group(1) in _AGENT_ROLE_ACTIONS:
+                return m.group(1)
+        # Keyword scan fallback
+        for aid in ("commander_agent", "communication_agent",
+                    "logistics_agent", "police_agent", "medical_agent"):
             if aid in prompt:
                 return aid
         return "medical_agent"
