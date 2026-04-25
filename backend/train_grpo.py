@@ -384,8 +384,50 @@ def verify_sampling(model: Any, tokenizer: Any, n: int = 4) -> None:
 class GRPODebugCallback:
     """
     PART 10: Prints reward_std, loss, grad_norm every logging step.
-    Also flags reward_std=0 as a critical error.
+
+    Inherits from transformers.TrainerCallback so all required lifecycle
+    methods (on_init_end, on_train_begin, etc.) are provided automatically.
     """
+
+    # Lazy import so the class definition doesn't require transformers at
+    # module-level (keeps the file importable even without the training deps).
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+
+    def __new__(cls) -> "GRPODebugCallback":  # type: ignore[misc]
+        # Dynamically inherit from TrainerCallback at instantiation time so
+        # all required Trainer lifecycle hooks are satisfied.
+        try:
+            from transformers import TrainerCallback
+
+            dynamic_cls = type(
+                "GRPODebugCallback",
+                (TrainerCallback,),
+                {
+                    "on_init_end":    cls.on_init_end,
+                    "on_log":         cls.on_log,
+                    "on_step_end":    cls.on_step_end,
+                    "on_train_begin": cls.on_train_begin,
+                },
+            )
+            return object.__new__(dynamic_cls)  # type: ignore[return-value]
+        except ImportError:
+            return object.__new__(cls)
+
+    # ── Required lifecycle stubs ──────────────────────────────────────────────
+
+    def on_init_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        print("[GRPODebugCallback] Trainer initialised — sampling + LoRA active.")
+        return control
+
+    def on_train_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        print("[GRPODebugCallback] Training started. Watching reward_std …")
+        return control
+
+    def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        return control
+
+    # ── Main log handler ──────────────────────────────────────────────────────
 
     def on_log(
         self,
@@ -394,23 +436,24 @@ class GRPODebugCallback:
         control: Any,
         logs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
-    ) -> None:
+    ) -> Any:
         if not logs:
-            return
-        step      = getattr(state, "global_step", "?")
-        r         = logs.get("reward",       "—")
-        r_std     = logs.get("reward_std",   "—")
-        loss      = logs.get("loss",         "—")
-        g_norm    = logs.get("grad_norm",    "—")
-        lr        = logs.get("learning_rate","—")
-        clipped   = logs.get("clipfrac",     logs.get("clip_ratio", "—"))
+            return control
+
+        step    = getattr(state, "global_step", "?")
+        r       = logs.get("reward",        "—")
+        r_std   = logs.get("reward_std",    "—")
+        loss    = logs.get("loss",          "—")
+        g_norm  = logs.get("grad_norm",     "—")
+        lr      = logs.get("learning_rate", "—")
+        clipped = logs.get("clipfrac", logs.get("clip_ratio", "—"))
 
         std_flag = ""
         if isinstance(r_std, (int, float)):
             if r_std == 0.0:
                 std_flag = "  🚨 reward_std=0 — GRPO NOT LEARNING"
             elif r_std < 1.0:
-                std_flag = "  ⚠ reward_std low"
+                std_flag = "  ⚠ low"
             else:
                 std_flag = "  ✓"
 
@@ -425,6 +468,7 @@ class GRPODebugCallback:
             f"  lr          = {lr}\n"
             f"{'─'*55}"
         )
+        return control
 
 
 # ─── Training entry point ─────────────────────────────────────────────────────
