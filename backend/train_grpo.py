@@ -457,6 +457,8 @@ class GRPODebugCallback:
             else:
                 std_flag = "  ✓"
 
+        # Step 5: concise one-liner first, then full block
+        print(f"Step {step} | Reward: {r} | Std: {r_std} | Loss: {loss} | GradNorm: {g_norm}")
         print(
             f"\n{'─'*55}\n"
             f"[GRPO step {step}]\n"
@@ -468,6 +470,17 @@ class GRPODebugCallback:
             f"  lr          = {lr}\n"
             f"{'─'*55}"
         )
+
+        # Step 6: safety early-stop if training stalls after step 200
+        if (
+            isinstance(step, int) and step > 200
+            and isinstance(r_std, (int, float)) and r_std < 1.0
+            and hasattr(control, "should_training_stop")
+        ):
+            print(f"⚠ reward_std={r_std:.4f} < 1.0 after step {step} — "
+                  "training stalled. Triggering early stop.")
+            control.should_training_stop = True
+
         return control
 
 
@@ -485,8 +498,8 @@ def train(
     per_device_train_batch_size: int   = 1,
     gradient_accumulation_steps: int   = 4,
     logging_steps:               int   = 5,
-    save_steps:                  int   = 50,
-    max_steps:                   int   = 100,
+    save_steps:                  int   = 50,    # Step 2: checkpoint every 50 steps
+    max_steps:                   int   = 500,   # Step 1: 100 → 500
     use_fp16:                    bool  = True,
 ) -> None:
     import torch
@@ -607,13 +620,22 @@ def train(
     )
 
     print("\n[train] Starting GRPO loop — watch for reward_std > 0 …\n")
-    trainer.train()
+    print(f"[train] max_steps=500 · save every 50 steps · auto-resume enabled\n")
 
+    # Step 3: resume from checkpoint if one exists (safe for Colab disconnects)
+    trainer.train(resume_from_checkpoint=True)
+
+    # Step 4: save two copies — rolling checkpoint dir + explicit final dir
+    final_dir = output_dir.rstrip("/") + "-final"
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
-    print(f"\n[train] Saved to {output_dir}")
+    trainer.save_model(final_dir)
+    tokenizer.save_pretrained(final_dir)
+    print(f"\n[train] Checkpoint saved to : {output_dir}")
+    print(f"[train] Final model saved to : {final_dir}")
     _save_artifacts(output_dir, reward_fn, model_name, level, samples, config)
-    print("[train] Done.")
+    _save_artifacts(final_dir,  reward_fn, model_name, level, samples, config)
+    print("[train] Done. Artifacts saved to both checkpoint and final dirs.")
 
 
 def _grpo_entropy_kwargs() -> Dict[str, Any]:
