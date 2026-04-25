@@ -797,6 +797,23 @@ def train(
 
     # ── GRPOConfig (spec §4) ──────────────────────────────────────────────────
     _fp16_active = use_fp16 and torch.cuda.is_available()
+
+    # Length kwargs are version-dependent; helper introspects the installed TRL
+    _length_kw = _grpo_length_kwargs(max_prompt=512, max_completion=MAX_NEW_TOKENS)
+    print(f"[GRPOConfig] length kwargs resolved: {_length_kw}")
+
+    # Sampling kwargs: only pass if accepted (some TRL builds strip them)
+    _sample_kw: Dict[str, Any] = {}
+    try:
+        from trl import GRPOConfig as _GC
+        _gsig = inspect.signature(_GC.__init__).parameters
+        if "temperature" in _gsig:
+            _sample_kw["temperature"] = SAMPLING_KWARGS["temperature"]
+        if "top_p" in _gsig:
+            _sample_kw["top_p"] = SAMPLING_KWARGS["top_p"]
+    except Exception:
+        pass
+
     config = GRPOConfig(
         output_dir                  = output_dir,
         per_device_train_batch_size = per_device_train_batch_size,
@@ -805,17 +822,14 @@ def train(
         learning_rate               = learning_rate,
         num_train_epochs            = num_train_epochs,
         max_steps                   = max_steps,
-        max_prompt_length           = 512,
-        max_completion_length       = MAX_NEW_TOKENS,    # 48 (spec §4)
         logging_steps               = logging_steps,
         save_steps                  = save_steps,
         save_total_limit            = 3,
         fp16                        = _fp16_active,
         bf16                        = False,
         report_to                   = "none",
-        # spec §4 sampling (also enforced via model.generation_config + Layer 2)
-        temperature                 = SAMPLING_KWARGS["temperature"],  # 0.8
-        top_p                       = SAMPLING_KWARGS["top_p"],        # 0.9
+        **_length_kw,      # max_prompt_length / max_completion_length (version-safe)
+        **_sample_kw,      # temperature / top_p (version-safe)
         **_grpo_entropy_kwargs(),
     )
 
@@ -858,6 +872,42 @@ def train(
     _save_artifacts(output_dir, reward_fn, model_name, level, samples, config)
     _save_artifacts(final_dir,  reward_fn, model_name, level, samples, config)
     print("[train] Done. Artifacts saved to both checkpoint and final dirs.")
+
+
+def _grpo_length_kwargs(max_prompt: int = 512, max_completion: int = 48) -> Dict[str, Any]:
+    """
+    TRL renamed length params across versions.  Inspect the installed signature
+    and return only the kwargs that actually exist.
+
+    Known name history:
+      max_prompt_length / max_new_tokens  (older TRL ~0.8)
+      max_prompt_length                   (TRL 0.9–0.12)
+      max_length / truncation             (some forks)
+      dropped entirely                    (some nightly builds)
+    max_completion_length is stable across all versions we target.
+    """
+    try:
+        from trl import GRPOConfig as _C
+        sig    = inspect.signature(_C.__init__)
+        params = sig.parameters
+        out: Dict[str, Any] = {}
+
+        # Prompt length — try known names in preference order
+        for pname in ("max_prompt_length", "max_length"):
+            if pname in params:
+                out[pname] = max_prompt
+                break
+
+        # Completion / generation length
+        for cname in ("max_completion_length", "max_new_tokens", "max_generate_length"):
+            if cname in params:
+                out[cname] = max_completion
+                break
+
+        return out
+    except Exception:
+        # Fallback: pass nothing — model.generation_config caps length anyway
+        return {}
 
 
 def _grpo_entropy_kwargs() -> Dict[str, Any]:
