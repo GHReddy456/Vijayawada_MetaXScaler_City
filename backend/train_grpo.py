@@ -56,27 +56,34 @@ _dynamic_temperature: float = SAMPLING_KWARGS["temperature"]
 
 # ─── Observation → prompt ─────────────────────────────────────────────────────
 
-_SOFT_SYSTEM_PROMPT = """\
-You are an AI agent in CrisisWorld.
-
-Your job is to choose ONE action.
-
-Respond in JSON format like this:
-
-{{
-  "agent_id": "medical_agent",
-  "action_type": "dispatch",
-  "target": [x, y],
-  "metadata": {{}}
-}}
-
-Valid agents:
-medical_agent, police_agent, logistics_agent, communication_agent, commander_agent
-
-Valid actions:
-dispatch, route, block, allocate, broadcast
-
-Action:"""
+# Role-specific instructions — each agent knows its job and valid actions.
+_ROLE_INSTRUCTIONS: Dict[str, str] = {
+    "medical_agent": (
+        "You are responsible for saving casualties. "
+        "Prioritize visible events with injuries. "
+        "Use: dispatch (send ambulance), route (plan path), allocate (assign resources), broadcast (share info)."
+    ),
+    "police_agent": (
+        "You manage roads and safety. "
+        "Clear blocked roads and secure routes for other agents. "
+        "Use: dispatch (deploy unit), route (clear path), block (close road), broadcast (warn others)."
+    ),
+    "logistics_agent": (
+        "You manage supplies and hospital capacity. "
+        "Balance resources across locations — do NOT always pick [5,5]. "
+        "Use: dispatch (send supplies), route (plan delivery), allocate (assign to hospital), broadcast (share status)."
+    ),
+    "communication_agent": (
+        "You share critical information so other agents can act. "
+        "Broadcast only when you have useful location or status info. "
+        "Use: broadcast (share info), route (check paths)."
+    ),
+    "commander_agent": (
+        "You coordinate all agents and resolve conflicts. "
+        "Assign priorities and direct the team. "
+        "Use: dispatch, route, block, allocate, broadcast."
+    ),
+}
 
 _VALID_ACTION_TYPES = {"dispatch", "route", "block", "allocate", "broadcast"}
 
@@ -94,32 +101,49 @@ _AGENT_ROLE_ACTIONS: Dict[str, set] = {
 
 
 def _json_prefix(agent_id: str) -> str:
-    """The JSON prefix that ends every prompt.
-    The model only needs to generate the REST of the JSON after this.
-    Example completion for agent_id=medical_agent:
-      dispatch","target":[3,7],"metadata":{}}
-    That is ~15 tokens — well within max_new_tokens=32.
-    """
+    """Prefix-forcing: prompt ends here, model generates the JSON suffix."""
     return f'{{"agent_id":"{agent_id}","action_type":"'
+
+
+def _sample_target_from_obs(observation: Dict[str, Any]) -> List[int]:
+    """FIX 3: sample a meaningful target from visible events rather than [5,5]."""
+    events = observation.get("visible_events", [])
+    for ev in events[:4]:
+        loc = ev.get("location") or ev.get("position")
+        if isinstance(loc, (list, tuple)) and len(loc) == 2:
+            try:
+                x, y = int(loc[0]), int(loc[1])
+                if 0 <= x <= 9 and 0 <= y <= 9:
+                    return [x, y]
+            except (TypeError, ValueError):
+                pass
+    # No usable event location — random but NOT always [5,5]
+    return [random.randint(0, 9), random.randint(0, 9)]
 
 
 def observation_to_prompt(observation: Dict[str, Any], agent_id: str) -> str:
     visible   = observation.get("visible_events", [])
     resources = observation.get("resource_status", {})
 
-    # Keep the context minimal — small model needs short prompts.
+    # FIX 3: show a meaningful suggested target so model doesn't blindly use [5,5]
+    suggested = _sample_target_from_obs(observation)
     events_str = json.dumps(visible[:2])
     res_str    = json.dumps({k: v for k, v in list(resources.items())[:3]})
 
-    # End with the JSON prefix so the model just continues completing it.
-    # This is prefix-forcing: eliminates the "where does JSON start?" problem.
+    role_desc  = _ROLE_INSTRUCTIONS.get(agent_id, "You are a CrisisWorld agent.")
+    allowed    = ", ".join(sorted(_AGENT_ROLE_ACTIONS.get(agent_id, _VALID_ACTION_TYPES)))
+
+    # FIX 1+2: strict format + role-specific context + prefix-forcing
     prompt = (
-        f"You are a CrisisWorld agent. agent_id={agent_id}\n"
-        f"Valid actions: dispatch, route, block, allocate, broadcast\n"
+        f"{role_desc}\n\n"
+        f"agent_id={agent_id}  |  valid actions: {allowed}\n"
+        f"RULES: output ONLY JSON | target must be [x,y] within 0-9 "
+        f"| choose target from events, NOT always [5,5] | no text outside JSON\n\n"
         f"Events: {events_str}\n"
         f"Resources: {res_str}\n"
+        f"Suggested target: {suggested}\n\n"
         f"Output JSON:\n"
-        f"{_json_prefix(agent_id)}"   # ← model continues from here
+        f"{_json_prefix(agent_id)}"  # model continues from here
     )
     return prompt
 
@@ -523,13 +547,21 @@ class CrisisWorldReward:
                 continue
 
             if atype == self._ILLEGAL_ACTION:
-                # Repair and run the episode; deduct -30 correction penalty.
-                model_action = fix_action(model_action, agent_id)
-                model_action["_was_repaired"] = True
-                atype = model_action["action_type"]
+                # FIX 4: NO auto-repair — force model to learn correct format.
+                # Hard penalty and skip episode so GRPO sees a clear signal.
                 self._json_invalid_count += 1
-                print(f"    [{idx}] ⚠ ILLEGAL ACTION → repaired to "
-                      f"{atype}  (penalty -30 applied)")
+                penalty = -50.0 + random.uniform(-2.0, 2.0)
+                print(f"    [{idx}] ⚠ ILLEGAL ACTION → reward={penalty:.1f}  "
+                      f"(no repair — model must learn)")
+                rewards.append(penalty)
+                self.episode_rewards.append(penalty)
+                self.episode_deaths.append(0)
+                self.episode_coordination.append(0.0)
+                self.episode_trust.append(0.0)
+                self.episode_panic.append(0.0)
+                self._curriculum_step_total += 1
+                self._prev_completion_action = ""   # reset chain on illegal
+                continue
 
             self._json_valid_count += 1
 
