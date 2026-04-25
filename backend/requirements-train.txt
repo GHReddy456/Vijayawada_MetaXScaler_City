@@ -1,9 +1,14 @@
 -r requirements.txt
+
+# ── Core training stack ───────────────────────────────────────────────────────
 datasets>=2.19.0
-trl>=0.9.0
+trl>=0.9.6
 transformers>=4.44.0
 accelerate>=1.4.0
 torch>=2.4.0
 
-# Optional accelerator path (primarily Linux + CUDA).
+# ── STEP 3: LoRA support (required for efficient fine-tuning) ─────────────────
+peft>=0.10.0
+
+# ── Optional: Unsloth 4-bit acceleration (Linux + CUDA only) ─────────────────
 unsloth>=2025.1.0; platform_system == "Linux"
