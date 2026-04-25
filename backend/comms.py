@@ -22,26 +22,17 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# ─── Role dependency map ───────────────────────────────────────────────────────
-# Defines which agents an agent depends on for specific situations.
-# key = (agent_id, reason) → target_agent_id
-DEPENDENCY_MAP: Dict[Tuple[str, str], str] = {
-    ("medical_agent", "route_unknown"):       "police_agent",
-    ("medical_agent", "resource_conflict"):   "logistics_agent",
-    ("medical_agent", "needs_escort"):        "police_agent",
-    ("medical_agent", "priority_unclear"):    "commander_agent",
-    ("police_agent",  "public_panic"):        "communication_agent",
-    ("police_agent",  "resource_conflict"):   "commander_agent",
-    ("police_agent",  "casualty_update"):     "medical_agent",
-    ("logistics_agent", "capacity_unknown"):  "medical_agent",
-    ("logistics_agent", "priority_unclear"):  "commander_agent",
-    ("logistics_agent", "resource_conflict"): "commander_agent",
-    ("communication_agent", "route_unknown"): "police_agent",
-    ("communication_agent", "severity_unconfirmed"): "commander_agent",
-    ("communication_agent", "misinformation"): "commander_agent",
-    ("commander_agent", "resource_conflict"): "logistics_agent",
-    ("commander_agent", "route_update"):      "police_agent",
-    ("commander_agent", "casualty_critical"): "medical_agent",
+# ─── Agent capability registry (replaces hardcoded DEPENDENCY_MAP) ────────────
+# Each agent declares what it CAN help with. Receiver is chosen dynamically
+# by matching the sender's need against the set of capable agents.
+# No hardcoded sender→receiver pairs — coordination is emergent via rewards.
+
+AGENT_CAPABILITIES: Dict[str, set] = {
+    "police_agent":         {"route", "blocked", "secure", "escort", "public_panic"},
+    "medical_agent":        {"casualty", "dispatch", "triage", "hospital"},
+    "logistics_agent":      {"capacity", "supply", "allocate", "fuel", "resource"},
+    "communication_agent":  {"broadcast", "panic", "inform", "misinfo", "verify"},
+    "commander_agent":      {"priority", "conflict", "override", "coordinate", "all"},
 }
 
 # ─── Message type colors (for frontend) ───────────────────────────────────────
@@ -175,28 +166,43 @@ def should_communicate(
 
 
 def determine_receiver(agent_id: str, reason: str, observation: Dict[str, Any]) -> Optional[str]:
-    """Map (agent, reason) → specific target agent. Returns None if no match."""
-    key = (agent_id, reason)
-    receiver = DEPENDENCY_MAP.get(key)
+    """
+    Select the most capable receiver for this (sender, reason) pair.
 
-    # Fallback heuristics
-    if receiver is None:
-        if "route" in reason or "blocked" in reason:
-            receiver = "police_agent"
-        elif "capacity" in reason or "resource" in reason:
-            receiver = "logistics_agent"
-        elif "conflict" in reason or "priority" in reason:
-            receiver = "commander_agent"
-        elif "panic" in reason or "misinfo" in reason:
-            receiver = "communication_agent"
-        elif "casualty" in reason or "rescue" in reason:
-            receiver = "medical_agent"
+    No hardcoded dependency map — receiver is chosen by matching the reason
+    against AGENT_CAPABILITIES. If multiple agents can help, the one with
+    the highest contextual match score is chosen.
+    This produces emergent coordination: the sender does not know which
+    agent will respond; they broadcast a need and the most capable agent acts.
+    """
+    reason_lower = reason.lower()
+    candidates: Dict[str, int] = {}
 
-    # Avoid self-messaging
-    if receiver == agent_id:
+    for candidate_id, capabilities in AGENT_CAPABILITIES.items():
+        if candidate_id == agent_id:
+            continue   # no self-messaging
+        score = 0
+        # Keyword overlap between reason and capabilities
+        for cap in capabilities:
+            if cap in reason_lower or reason_lower in cap:
+                score += 2
+        # Substring match within reason words
+        reason_words = set(reason_lower.replace("_", " ").split())
+        for cap in capabilities:
+            if any(w in cap or cap in w for w in reason_words):
+                score += 1
+        # "all" capability (commander) always gets a baseline score
+        if "all" in capabilities:
+            score += 1
+        if score > 0:
+            candidates[candidate_id] = score
+
+    if not candidates:
         return None
 
-    return receiver
+    # Return the highest-scoring candidate; ties broken by deterministic order
+    best = max(candidates, key=lambda k: (candidates[k], k))
+    return best
 
 
 def _build_message_content(

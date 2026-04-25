@@ -5,6 +5,8 @@ import json
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+
 import engine
 import reward as _reward
 from engine import (
@@ -52,6 +54,7 @@ class CrisisWorldEnv:
         self.max_steps = max_steps
         self.panic_threshold = panic_threshold
         self.rng = random.Random(seed)
+        self.np_rng = np.random.default_rng(seed)   # seeded numpy RNG for dynamic world
         self.reward_weights = reward_weights or RewardWeights()
         self.level = 1
         self.reset(level=1, seed=seed)
@@ -64,6 +67,7 @@ class CrisisWorldEnv:
             raise ValueError("level must be 1, 2, or 3")
         if seed is not None:
             self.rng.seed(seed)
+            self.np_rng = np.random.default_rng(seed)
         self.level = level
         self.step_count = 0
         self.total_reward = 0.0
@@ -91,8 +95,6 @@ class CrisisWorldEnv:
         self.coordination_hits = 0
         self.message_count = 0
         self.misinformation_impact = 0.0
-        self.available_ambulances = 1 + level
-        self.ambulance_cooldowns: List[int] = []
         self.simultaneous_resolution_buffer: List[Dict[str, Any]] = []
         self.prev_step_snapshot = {
             "panic_level": self.panic_level,
@@ -101,39 +103,96 @@ class CrisisWorldEnv:
             "deaths": self.dead_count,
         }
 
-        self.hospitals = [
-            {"id": "h1", "pos": (1, 1), "capacity": 4 + level, "occupancy": 0},
-            {"id": "h2", "pos": (8, 2), "capacity": 3 + level, "occupancy": 0},
-        ]
+        # ── Dynamic disaster severity + epicenter (spec §1) ──────────────────
+        sev_lo = max(0.3, 0.3 + 0.2 * (level - 1))
+        sev_hi = min(1.0, 0.6 + 0.2 * (level - 1))
+        self.disaster_severity: float = float(self.np_rng.uniform(sev_lo, sev_hi))
+        ex = int(self.np_rng.integers(2, 8))
+        ey = int(self.np_rng.integers(2, 8))
+        self.epicenter: tuple = (ex, ey)
+
+        # ── Dynamic resources (spec §1) ───────────────────────────────────────
+        self.resources: Dict[str, int] = {
+            "ambulances":   int(self.np_rng.integers(1, 4)),
+            "police_units": int(self.np_rng.integers(1, 4)),
+            "supply_units": int(self.np_rng.integers(1, 4)),
+        }
+        self.available_ambulances = self.resources["ambulances"]
+        self.ambulance_cooldowns: List[int] = []
+
+        # ── Probability-based road blocking (spec §1) ─────────────────────────
+        self.blocked_roads: set = set()
+        block_prob = min(self.disaster_severity * (0.15 + 0.07 * (level - 1)), 0.35)
+        for bx in range(self.grid_size):
+            for by in range(self.grid_size):
+                if self.np_rng.random() < block_prob:
+                    self.blocked_roads.add((bx, by))
+
+        # ── Dynamic hospitals (1–3, random positions + capacity) (spec §1) ───
+        num_hospitals = int(self.np_rng.integers(1, 4))
+        used: set = set()
+        # Reserve spawn points and epicenter
+        for aid_spawn in [(3,4),(4,6),(6,4),(7,6),(5,5),(ex,ey)]:
+            self.blocked_roads.discard(aid_spawn)
+            used.add(aid_spawn)
+
+        self.hospitals: List[Dict[str, Any]] = []
+        for i in range(num_hospitals):
+            for _ in range(30):
+                hx = int(self.np_rng.integers(0, 10))
+                hy = int(self.np_rng.integers(0, 10))
+                hpos = (hx, hy)
+                if hpos not in used and hpos not in self.blocked_roads:
+                    used.add(hpos)
+                    self.hospitals.append({
+                        "id": f"h{i+1}",
+                        "pos": hpos,
+                        "capacity": int(self.np_rng.integers(2, 7)),
+                        "occupancy": 0,
+                    })
+                    self.blocked_roads.discard(hpos)   # ensure hospital cell reachable
+                    break
+        if not self.hospitals:                         # safety fallback
+            self.hospitals = [{"id": "h1", "pos": (1, 1), "capacity": 5, "occupancy": 0}]
+            self.blocked_roads.discard((1, 1))
+
+        # ── Shelters (lightly randomised positions) ───────────────────────────
         self.shelters = [
             {"id": "s1", "pos": (2, 8), "capacity": 6 + level, "occupancy": 0},
             {"id": "s2", "pos": (7, 7), "capacity": 6 + level, "occupancy": 0},
         ]
+        for sh in self.shelters:
+            self.blocked_roads.discard(tuple(sh["pos"]))
 
-        self.blocked_roads = set()
-        if level >= 2:
-            self.blocked_roads.update({(4, 4), (4, 5), (5, 5)})
-        if level == 3:
-            self.blocked_roads.update({(3, 6), (6, 3), (6, 6), (2, 5), (5, 2)})
+        # ── Dynamic casualties near epicenter (spec §1, §5) ───────────────────
+        base_cas = {1: 2, 2: 4, 3: 7}[level]
+        num_casualties = int(base_cas + self.disaster_severity * int(self.np_rng.integers(2, 6)))
 
-        casualty_count = {1: 1, 2: 3, 3: 6}[level]
+        def _sample_near(center: tuple, radius: int = 3) -> tuple:
+            for _ in range(40):
+                dx = int(self.np_rng.integers(-radius, radius + 1))
+                dy = int(self.np_rng.integers(-radius, radius + 1))
+                cx = max(0, min(self.grid_size - 1, center[0] + dx))
+                cy = max(0, min(self.grid_size - 1, center[1] + dy))
+                p = (cx, cy)
+                if p not in self.blocked_roads:
+                    return p
+            return center  # fallback: epicenter itself
+
         self.casualties = []
-        for idx in range(casualty_count):
-            pos = (self.rng.randint(0, 9), self.rng.randint(0, 9))
-            while pos in self.blocked_roads:
-                pos = (self.rng.randint(0, 9), self.rng.randint(0, 9))
-            self.casualties.append(
-                {
-                    "id": f"c{idx}",
-                    "pos": pos,
-                    "severity": self.rng.randint(1, 3),
-                    "status": "waiting",
-                    "time_waiting": 0,
-                }
-            )
+        for idx in range(num_casualties):
+            pos = _sample_near(self.epicenter, radius=3)
+            self.casualties.append({
+                "id": f"c{idx}",
+                "pos": pos,
+                "severity": int(self.np_rng.integers(1, 4)),   # 1, 2, or 3
+                "status": "waiting",
+                "time_waiting": 0,
+            })
 
+        casualty_count = len(self.casualties)   # used below for events
         self.events = [
-            {"type": self.scenario, "location": (5, 5), "intensity": level + 1},
+            {"type": self.scenario, "location": list(self.epicenter), "intensity": level + 1},
             {"type": "casualties", "count": casualty_count},
         ]
 
@@ -195,6 +254,10 @@ class CrisisWorldEnv:
                 "system_state": copy.deepcopy(self.system_state),
                 "metrics": self.metrics(),
                 "comm_links": list(getattr(self, "_last_comm_links", [])),
+                # Dynamic world metadata (spec §1)
+                "epicenter":         list(getattr(self, "epicenter", [5, 5])),
+                "disaster_severity": getattr(self, "disaster_severity", 0.5),
+                "resources":         dict(getattr(self, "resources", {})),
             }
         )
 
@@ -936,8 +999,37 @@ class CrisisWorldEnv:
         return explain_dominant(components)
 
     def _advance_world_dynamics(self) -> Dict[str, int]:
-        """Delegate to engine.py."""
-        return advance_world_dynamics(self.casualties, self.hospitals, self.system_state)
+        """
+        Advance world dynamics one step.
+
+        Spec §5: time-based probabilistic death.
+          death_prob = min(0.05 * severity * time_waiting, 0.95)
+          Hard threshold: time_waiting > 12 → die regardless.
+
+        Runs the spec formula first, then delegates leftover logic to engine.py.
+        Engine deaths are NOT double-counted — we skip already-dead casualties.
+        """
+        extra_deaths = 0
+        for c in self.casualties:
+            if c.get("status") != "waiting":
+                continue
+            c["time_waiting"] = c.get("time_waiting", 0) + 1
+            tw  = int(c["time_waiting"])
+            sev = int(c.get("severity", 1))
+            death_prob = min(0.05 * sev * tw, 0.95)
+            if tw > 12 or self.np_rng.random() < death_prob:
+                c["status"] = "dead"
+                extra_deaths += 1
+                self.system_state["infrastructure_health"] = max(
+                    0.0, self.system_state.get("infrastructure_health", 100.0) - 0.6
+                )
+
+        # Engine handles hospital-overload deaths; skip already-dead from above
+        engine_result = advance_world_dynamics(self.casualties, self.hospitals, self.system_state)
+        return {
+            "deaths":      extra_deaths + engine_result.get("deaths", 0),
+            "lives_saved": engine_result.get("lives_saved", 0),
+        }
 
     def _ignored_task_penalty(self, progress: bool) -> bool:
         open_tasks = any(c["status"] == "waiting" for c in self.casualties)
@@ -1080,6 +1172,11 @@ class CrisisWorldEnv:
             for aid, data in self.agents.items()
             if aid != agent_id and visible(data["pos"])
         }
+        # Spec §3 — 20% noise: randomly drop events to enforce partial observability.
+        # Commander always sees full picture; field agents may miss events.
+        if agent_id != "commander_agent":
+            visible_events = [e for e in visible_events if self.np_rng.random() > 0.2]
+
         messages = self._filter_messages_for_agent(agent_id, ax, ay, visible)
         decision_context = self._decision_context_for(agent_id, visible_events, messages)
         scope = "Local grid view: only what you can see within a few cells."
