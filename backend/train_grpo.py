@@ -556,14 +556,33 @@ class CrisisWorldReward:
             format_bonus = 10.0 if was_repaired else (60.0 if correct_pair else 20.0)
             total        = format_bonus   # start here; env contribution is ADDITIVE below
 
-            # ── Run episode (short horizon=5 to limit negative accumulation) ────
-            lives_saved   = 0
-            deaths_delta  = 0
-            panic_delta   = 0.0
-            coord_events  = 0
-            init_metrics  = env.metrics()
+            # ── FIX 4: 25% chance to force a communication action ────────────────
+            # Seeds coord_rate with real signal before the model learns it.
+            if random.random() < 0.25:
+                state_now   = env.state() if hasattr(env, "state") else {}
+                epicenter   = state_now.get("epicenter", [5, 5])
+                model_action = {
+                    "agent_id":    "communication_agent",
+                    "action_type": "broadcast",
+                    "target":      epicenter,
+                    "metadata":    {"message": "status_update"},
+                }
+                agent_id = "communication_agent"
+                atype    = "broadcast"
+                # Recalculate format bonus for the overridden action
+                format_bonus = 60.0
+                total        = format_bonus
 
-            for step_idx in range(min(self.horizon, 5)):   # cap at 5 steps
+            # ── Run episode (short horizon=5) ─────────────────────────────────
+            lives_saved    = 0
+            deaths_delta   = 0
+            panic_delta    = 0.0
+            coord_events   = 0
+            broadcast_last = False      # FIX 5: track previous action type
+            init_metrics   = env.metrics()
+            prev_act_type  = ""
+
+            for step_idx in range(min(self.horizon, 5)):
                 joint: Dict[str, Any] = {}
                 for aid in AGENT_IDS:
                     if aid == agent_id:
@@ -580,20 +599,20 @@ class CrisisWorldReward:
                 except Exception:
                     break
 
-                obs_all       = result["observations"]
-                curr_metrics  = env.metrics()
-                info          = result.get("info", {})
+                obs_all      = result["observations"]
+                curr_metrics = env.metrics()
+                info         = result.get("info", {})
 
-                # Collect outcome signals (not raw step rewards)
+                # Outcome signals
                 lives_saved  += max(0, int(curr_metrics.get("rescue_success", 0))
                                     - int(init_metrics.get("rescue_success", 0)))
                 deaths_delta += max(0, int(curr_metrics.get("death_toll",     0))
                                     - int(init_metrics.get("death_toll",      0)))
-                panic_delta  += float(curr_metrics.get("panic_level", 0.0)) \
-                                - float(init_metrics.get("panic_level", 0.0))
+                panic_delta  += (float(curr_metrics.get("panic_level", 0.0))
+                                 - float(init_metrics.get("panic_level", 0.0)))
                 init_metrics  = curr_metrics
 
-                # Track coordination
+                # Coordination tracking
                 messages = info.get("messages", [])
                 self._total_messages += len(messages)
                 coord_bonus_val = float(info.get("comm_reward_bonus", 0.0))
@@ -601,23 +620,57 @@ class CrisisWorldReward:
                     self._successful_coord += 1
                     coord_events += 1
 
+                prev_act_type = atype
                 if result.get("done", False):
                     break
 
-            # ── Shaped outcome reward (clipped so format_bonus always dominates) ─
-            # lives_saved=1 → +30, death=1 → -10, panic up → -5, coord → +10
+            # ── FIX 1: Coordination reward ────────────────────────────────────
+            coord_bonus = 0.0
+            metadata    = model_action.get("metadata", {})
+            if metadata.get("message") or metadata.get("info"):
+                coord_bonus += 10.0           # message in metadata
+            if atype == "broadcast":
+                coord_bonus += 15.0           # explicit broadcast
+            if coord_events > 0:
+                coord_bonus += 20.0 * coord_events  # info reached another agent
+
+            # ── FIX 2: Inter-agent dependency penalties ───────────────────────
+            dependency_penalty = 0.0
+            env_state = env.state() if hasattr(env, "state") else {}
+            if agent_id == "medical_agent" and atype == "dispatch":
+                if not env_state.get("safe_route_known", False):
+                    dependency_penalty -= 40.0   # needs police clearance first
+            if agent_id == "logistics_agent" and atype == "allocate":
+                if not env_state.get("hospital_capacity_known", False):
+                    dependency_penalty -= 30.0   # needs comm agent info first
+
+            # ── FIX 3: Broadcast gets a strong positive baseline ──────────────
+            broadcast_bonus = 30.0 if atype == "broadcast" else 0.0
+
+            # ── FIX 5: Communication-action chain bonus ───────────────────────
+            chain_bonus = 0.0
+            if prev_act_type == "broadcast" and atype == "dispatch":
+                chain_bonus = 25.0   # comm → action chain observed
+
+            # ── Shaped outcome (clipped so format_bonus always dominates) ─────
             outcome = (
                 lives_saved  * 30.0
                 - deaths_delta * 10.0
                 - max(0.0, panic_delta) * 5.0
-                + coord_events * 10.0
+                + coord_bonus
+                + broadcast_bonus
+                + chain_bonus
+                + dependency_penalty
             )
-            # Clip so worst episode adds -20 at most and best adds +40 at most
-            outcome_clipped = max(-20.0, min(40.0, outcome))
+            outcome_clipped = max(-20.0, min(60.0, outcome))
             total += outcome_clipped + random.uniform(-3.0, 3.0)
 
-            print(f"    [{idx}] reward = {total:.2f}  "
-                  f"(format={format_bonus:.0f}  outcome={outcome_clipped:.1f})")
+            print(
+                f"    [{idx}] reward = {total:.2f}  "
+                f"(fmt={format_bonus:.0f}  out={outcome_clipped:.1f}  "
+                f"coord={coord_bonus:.0f}  bcast={broadcast_bonus:.0f}  "
+                f"chain={chain_bonus:.0f}  dep={dependency_penalty:.0f})"
+            )
             rewards.append(total)
 
             m = env.metrics()
