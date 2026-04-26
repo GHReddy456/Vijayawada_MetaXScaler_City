@@ -434,8 +434,10 @@ class CrisisWorldReward:
         # ── Core outcomes ────────────────────────────────────────────────────
         lives_saved = max(0.0, float(curr.get("rescue_success_rate", 0.0)) - float(prev.get("rescue_success_rate", 0.0)))
         deaths      = max(0.0, float(curr.get("deaths",            0.0)) - float(prev.get("deaths",            0.0)))
-        r += 50.0 * lives_saved
-        r -= 100.0 * deaths
+        # rescue_success_rate is a percentage (0–100): 1 pt per percent gained
+        # deaths is a raw count: 10 pts per additional death
+        r += 1.0 * lives_saved
+        r -= 10.0 * deaths
 
         # ── Time pressure — every step costs 2 (forces urgency) ──────────────
         r -= 2.0
@@ -649,8 +651,11 @@ class CrisisWorldReward:
                     break
 
             # 2. ENVIRONMENT OUTCOME
-            total += lives_saved  * 50.0
-            total -= deaths_delta * 100.0
+            # rescue_success_rate is a percentage (0–100), so 1 pt per percent gained.
+            # deaths is a raw count (0–11+), so 10 pts per death.
+            # This keeps both in the ~0–100 range matching other reward terms.
+            total += lives_saved  * 1.0
+            total -= deaths_delta * 10.0
             total -= max(0.0, panic_delta) * 2.0
 
             # 3. COORDINATION (balanced)
