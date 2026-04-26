@@ -258,6 +258,10 @@ class CrisisWorldReward:
     episode_coordination: List[float] = field(default_factory=list)
     episode_trust:        List[float] = field(default_factory=list)
     episode_panic:        List[float] = field(default_factory=list)
+    # Per-rollout env outcomes (for before/after + trend lines; same length as episode_deaths)
+    episode_rescue:       List[float] = field(default_factory=list)  # rescue_success_rate %
+    episode_json_ok:      List[int]   = field(default_factory=list)  # 1 = valid JSON + env ran
+    episode_chain:        List[float] = field(default_factory=list)  # 1.0 if chain bonus hit
 
     # Coordination rate (spec §7)
     _total_messages:        int = field(default=0,   repr=False)
@@ -277,10 +281,6 @@ class CrisisWorldReward:
     # Sentinel strings stored in action_type to communicate parse outcomes
     _INVALID_JSON  = "__invalid_json__"   # → reward = -200, skip env step
     _ILLEGAL_ACTION = "__illegal__"       # → reward = -120, skip env step
-
-    # Track JSON validity for coordination_rate calculation
-    _json_valid_count:   int = field(default=0, repr=False)
-    _json_invalid_count: int = field(default=0, repr=False)
 
     @staticmethod
     def _try_parse_json(text: str) -> Optional[Dict]:
@@ -529,6 +529,79 @@ class CrisisWorldReward:
             return 1.0
         return round(self._json_valid_count / total, 3)
 
+    def rolling_means(self, window: int = 50) -> Dict[str, float]:
+        """Mean of the last `window` rollouts — used for smooth training curves."""
+        n = len(self.episode_deaths)
+        if n == 0:
+            return {}
+        lo = max(0, n - window)
+        sl = slice(lo, n)
+
+        def _mean(xs: List[Any]) -> float:
+            chunk = xs[sl]
+            return float(sum(chunk) / len(chunk)) if chunk else 0.0
+
+        return {
+            "deaths":          _mean(self.episode_deaths),
+            "panic":           _mean(self.episode_panic),
+            "trust":           _mean(self.episode_trust),
+            "coord_env":       _mean(self.episode_coordination),
+            "rescue_pct":      _mean(self.episode_rescue),
+            "chain_hit":       _mean(self.episode_chain),
+            "json_ok_rollout": _mean(self.episode_json_ok),
+        }
+
+    def rollout_before_after_report(self, first_k: int = 40, last_k: int = 40) -> str:
+        """
+        Judge-facing: compare early vs late rollouts on the same metrics as JSON validity.
+        All values are from the live env (no hardcoded baselines).
+        """
+        n = len(self.episode_deaths)
+        if n < 8:
+            return f"[before/after] not enough rollouts yet (n={n}); need ≥8."
+
+        fk = min(first_k, n // 2)
+        lk = min(last_k, n // 2)
+        e_slice = slice(0, fk)
+        l_slice = slice(n - lk, n)
+
+        def _avg(xs: List[Any], sl: slice) -> float:
+            chunk = xs[sl]
+            return float(sum(chunk) / len(chunk)) if chunk else 0.0
+
+        lines = [
+            "",
+            "=" * 60,
+            "  BEFORE vs AFTER TRAINING (same metrics, early vs late rollouts)",
+            "=" * 60,
+            f"  Rollouts: first {fk} vs last {lk}  (total completed: {n})",
+            "",
+        ]
+        pairs = [
+            ("json_ok_rate", self.episode_json_ok, True, 100.0, "%"),
+            ("rescue_success_%", self.episode_rescue, True, 1.0, ""),
+            ("trust_score", self.episode_trust, True, 1.0, ""),
+            ("coord_score_%", self.episode_coordination, True, 1.0, ""),
+            ("chain_bonus_hit_%", self.episode_chain, True, 100.0, "%"),
+            ("deaths (lower better)", self.episode_deaths, False, 1.0, ""),
+            ("panic (lower better)", self.episode_panic, False, 1.0, ""),
+        ]
+        for label, series, higher_better, scale, suffix in pairs:
+            if not series:
+                continue
+            a = _avg(series, e_slice) * scale
+            b = _avg(series, l_slice) * scale
+            if higher_better:
+                better = "improved ✓" if b > a + 1e-6 else ("worse ✗" if b < a - 1e-6 else "flat")
+            else:
+                better = "improved ✓" if b < a - 1e-6 else ("worse ✗" if b > a + 1e-6 else "flat")
+            sfx = suffix if suffix else ""
+            lines.append(
+                f"  {label:22}  early={a:8.2f}{sfx}  late={b:8.2f}{sfx}  → {better}"
+            )
+        lines.append("=" * 60)
+        return "\n".join(lines)
+
     def __call__(
         self,
         completions: List[str],
@@ -563,6 +636,9 @@ class CrisisWorldReward:
                 self.episode_coordination.append(0.0)
                 self.episode_trust.append(0.0)
                 self.episode_panic.append(0.0)
+                self.episode_rescue.append(0.0)
+                self.episode_json_ok.append(0)
+                self.episode_chain.append(0.0)
                 self._curriculum_step_total += 1
                 continue
 
@@ -579,6 +655,9 @@ class CrisisWorldReward:
                 self.episode_coordination.append(0.0)
                 self.episode_trust.append(0.0)
                 self.episode_panic.append(0.0)
+                self.episode_rescue.append(0.0)
+                self.episode_json_ok.append(0)
+                self.episode_chain.append(0.0)
                 self._curriculum_step_total += 1
                 self._prev_completion_action = ""   # reset chain on illegal
                 continue
@@ -714,6 +793,9 @@ class CrisisWorldReward:
             self.episode_coordination.append(float(m.get("coordination_score", 0.0)))
             self.episode_trust.append(float(m.get("trust_score", 0.0)))
             self.episode_panic.append(float(m.get("panic_level", 0.0)))
+            self.episode_rescue.append(float(m.get("rescue_success_rate", 0.0)))
+            self.episode_json_ok.append(1)
+            self.episode_chain.append(1.0 if chain_bonus > 0 else 0.0)
             self._curriculum_step_total += 1
 
         # ── Batch summary + advantage guard (spec §5) ────────────────────────
@@ -860,6 +942,7 @@ class GRPODebugCallback:
                     "on_log":         cls.on_log,
                     "on_step_end":    cls.on_step_end,
                     "on_train_begin": cls.on_train_begin,
+                    "on_train_end":   cls.on_train_end,
                 },
             )
             return object.__new__(dynamic_cls)  # type: ignore[return-value]
@@ -873,7 +956,33 @@ class GRPODebugCallback:
         return control
 
     def on_train_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        # Must use plain attributes: the dynamic TrainerCallback subclass does not
+        # inherit @property descriptors from this class.
+        self._reward_hist: List[float] = []
+        self._json_roll_hist: List[float] = []
+        self._rescue_hist: List[float] = []
+        self._trust_hist: List[float] = []
+        self._coord_hist: List[float] = []
+        self._chain_hist: List[float] = []
+        self._death_inv_hist: List[float] = []   # -deaths → sparkline up = fewer deaths
+        self._panic_inv_hist: List[float] = []
         print("[GRPODebugCallback] Training started. Watching reward_std …")
+        return control
+
+    def on_train_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        rfn = getattr(self, "_reward_fn", None)
+        if rfn is not None and hasattr(rfn, "rollout_before_after_report"):
+            report = rfn.rollout_before_after_report()
+            print(report)
+            try:
+                od = getattr(args, "output_dir", None)
+                if od:
+                    p = Path(od) / "training_before_after.txt"
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(report + "\n", encoding="utf-8")
+                    print(f"[GRPODebugCallback] Wrote {p}")
+            except OSError:
+                pass
         return control
 
     def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
@@ -884,20 +993,18 @@ class GRPODebugCallback:
     # Attach reward_fn after construction so on_log can read live metrics
     _reward_fn: Any = None
 
-    def __init_subclass_post__(self) -> None:
-        pass
-
-    @property
-    def _reward_history(self) -> List[float]:
-        if not hasattr(self, "_reward_history_data"):
-            self._reward_history_data: List[float] = []
-        return self._reward_history_data
-
-    @property
-    def _json_history(self) -> List[float]:
-        if not hasattr(self, "_json_history_data"):
-            self._json_history_data: List[float] = []
-        return self._json_history_data
+    @staticmethod
+    def _sparkline(vals: List[float], width: int = 8) -> str:
+        bars = " ▁▂▃▄▅▆▇█"
+        if len(vals) < 2:
+            return "—"
+        recent = vals[-width:]
+        lo, hi = min(recent), max(recent)
+        if hi == lo:
+            return bars[4] * len(recent)
+        return "".join(
+            bars[max(1, int((v - lo) / (hi - lo) * 8))] for v in recent
+        )
 
     def on_log(
         self,
@@ -934,28 +1041,44 @@ class GRPODebugCallback:
             if rfn.episode_panic:
                 panic_last = f"{rfn.episode_panic[-1]:.1f}"
 
-        # Rolling history for trend display
+        # Rolling history (per logging step): smoothed env metrics + reward
+        if not hasattr(self, "_reward_hist"):
+            self._reward_hist = []
+            self._json_roll_hist = []
+            self._rescue_hist = []
+            self._trust_hist = []
+            self._coord_hist = []
+            self._chain_hist = []
+            self._death_inv_hist = []
+            self._panic_inv_hist = []
+
         if isinstance(r, (int, float)):
-            self._reward_history.append(float(r))   # property returns the list
-        if json_pct is not None:
-            self._json_history.append(float(json_pct) * 100.0)
+            self._reward_hist.append(float(r))
 
-        # Build 8-point sparkline from recent reward history
-        def _sparkline(vals: List[float], width: int = 8) -> str:
-            bars = " ▁▂▃▄▅▆▇█"
-            if len(vals) < 2:
-                return "—"
-            recent = vals[-width:]
-            lo, hi = min(recent), max(recent)
-            if hi == lo:
-                return bars[4] * len(recent)
-            return "".join(bars[max(1, int((v - lo) / (hi - lo) * 8))] for v in recent)
+        if rfn is not None and len(rfn.episode_deaths) >= 3:
+            w = min(80, len(rfn.episode_deaths))
+            rm = rfn.rolling_means(w)
+            self._json_roll_hist.append(rm["json_ok_rollout"] * 100.0)
+            self._rescue_hist.append(rm["rescue_pct"])
+            self._trust_hist.append(rm["trust"])
+            self._coord_hist.append(rm["coord_env"])
+            self._chain_hist.append(rm["chain_hit"] * 100.0)
+            self._death_inv_hist.append(-rm["deaths"])
+            self._panic_inv_hist.append(-rm["panic"])
+        elif json_pct is not None:
+            # Warm-up: only cumulative JSON rate available
+            self._json_roll_hist.append(float(json_pct) * 100.0)
 
-        reward_spark   = _sparkline(self._reward_history)
-        json_spark     = _sparkline(self._json_history)
+        reward_spark = self._sparkline(self._reward_hist)
+        json_spark   = self._sparkline(self._json_roll_hist)
+        rescue_spark = self._sparkline(self._rescue_hist)
+        trust_spark  = self._sparkline(self._trust_hist)
+        coord_spark  = self._sparkline(self._coord_hist)
+        chain_spark  = self._sparkline(self._chain_hist)
+        death_spark  = self._sparkline(self._death_inv_hist)
+        panic_spark  = self._sparkline(self._panic_inv_hist)
 
-        # Rolling 10-step average reward
-        window = self._reward_history[-10:] if self._reward_history else []
+        window = self._reward_hist[-10:] if self._reward_hist else []
         roll10 = f"{sum(window)/len(window):.1f}" if window else "—"
 
         std_flag = ""
@@ -967,14 +1090,17 @@ class GRPODebugCallback:
             else:
                 std_flag = "  ✓"
 
-        # spec §7: rich metric row every 5 steps
+        # spec §7 + multi-metric trends (rolling mean over last W rollouts)
         print(
             f"\nstep={step:>4} | reward_mean={r} | reward_std={r_std}{std_flag}\n"
             f"         | deaths={deaths_last} | panic={panic_last} "
             f"| coord_rate={coord_rate} | json_valid={json_valid}\n"
             f"         | loss={loss} | grad_norm={g_norm} | clip={clipped} | lr={lr}\n"
-            f"         | rolling10_reward={roll10}  "
-            f"reward_trend=[{reward_spark}]  json_trend=[{json_spark}]"
+            f"         | rolling10_reward={roll10}\n"
+            f"         | trends (last line = ↑ is better for all): "
+            f"reward[{reward_spark}] json%[{json_spark}] rescue%[{rescue_spark}]\n"
+            f"         | trust[{trust_spark}] coord[{coord_spark}] chain%[{chain_spark}] "
+            f"(-deaths)[{death_spark}] (-panic)[{panic_spark}]"
         )
 
         # Safety early-stop if training stalls after step 200 (spec §6)
