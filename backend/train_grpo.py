@@ -48,7 +48,9 @@ SAMPLING_KWARGS: Dict[str, Any] = {
     "top_p":              0.92,
     "repetition_penalty": 1.15,
 }
-MAX_NEW_TOKENS = 16   # prefix-forced to action type — model only generates "X,Y],metadata:{}}"
+# Keep completions long enough to avoid systematic truncation/clipping.
+# 16 was too tight in Colab runs (clipped_ratio=1), causing malformed JSON.
+MAX_NEW_TOKENS = int(os.getenv("CRISIS_MAX_NEW_TOKENS", "48"))
 
 # Temperature can be bumped dynamically when reward_std is too low (spec §2 guard)
 _dynamic_temperature: float = SAMPLING_KWARGS["temperature"]
@@ -646,7 +648,8 @@ class CrisisWorldReward:
             # GRPO signal now comes purely from target quality.
             if atype == self._INVALID_JSON:
                 self._json_invalid_count += 1
-                penalty = -20.0 + random.uniform(-2.0, 2.0)
+                # Stronger format penalty so json_valid converges to >97%.
+                penalty = -35.0 + random.uniform(-2.0, 2.0)
                 print(f"    [{idx}] ❌ INVALID JSON  → reward={penalty:.1f}")
                 rewards.append(penalty)
                 self.episode_rewards.append(penalty)
@@ -664,7 +667,7 @@ class CrisisWorldReward:
                 # FIX 4: NO auto-repair — force model to learn correct format.
                 # Hard penalty and skip episode so GRPO sees a clear signal.
                 self._json_invalid_count += 1
-                penalty = -50.0 + random.uniform(-2.0, 2.0)
+                penalty = -80.0 + random.uniform(-2.0, 2.0)
                 print(f"    [{idx}] ⚠ ILLEGAL ACTION → reward={penalty:.1f}  "
                       f"(no repair — model must learn)")
                 rewards.append(penalty)
@@ -749,8 +752,8 @@ class CrisisWorldReward:
             is_comm_agent = "communication" in agent_id
             total = 0.0
 
-            # 1. Format (smaller magnitude so outcomes and roles dominate)
-            total += 12.0 if valid_json else -18.0
+            # 1. Format prior: valid structured outputs get meaningful advantage.
+            total += 20.0 if valid_json else -30.0
 
             # 2. Environment outcome
             # Hackathon rubric: reward must be hard to game — wrong-role broadcast
@@ -768,7 +771,7 @@ class CrisisWorldReward:
                     total += 10.0
                     total += _clip_env_comm_term(env_comm_bonus_sum, 24.0)
                 else:
-                    total -= 42.0
+                    total -= 55.0
                 self._batch_broadcasters += 1
                 if self._batch_broadcasters > 1:
                     total -= 5.0 * (self._batch_broadcasters - 1)
