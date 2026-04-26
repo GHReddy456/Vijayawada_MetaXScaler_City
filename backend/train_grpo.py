@@ -49,8 +49,8 @@ SAMPLING_KWARGS: Dict[str, Any] = {
     "repetition_penalty": 1.15,
 }
 # Keep completions long enough to avoid systematic truncation/clipping.
-# 16 was too tight in Colab runs (clipped_ratio=1), causing malformed JSON.
-MAX_NEW_TOKENS = int(os.getenv("CRISIS_MAX_NEW_TOKENS", "48"))
+# 48 is still tight in long-rollout traces; use 64 by default.
+MAX_NEW_TOKENS = int(os.getenv("CRISIS_MAX_NEW_TOKENS", "64"))
 
 # Temperature can be bumped dynamically when reward_std is too low (spec §2 guard)
 _dynamic_temperature: float = SAMPLING_KWARGS["temperature"]
@@ -298,8 +298,8 @@ class CrisisWorldReward:
     _batch_broadcasters: int = field(default=0, repr=False)
 
     # Sentinel strings stored in action_type to communicate parse outcomes
-    _INVALID_JSON  = "__invalid_json__"   # → reward = -200, skip env step
-    _ILLEGAL_ACTION = "__illegal__"       # → reward = -120, skip env step
+    _INVALID_JSON  = "__invalid_json__"   # hard format failure
+    _ILLEGAL_ACTION = "__illegal__"       # role/action violation
 
     @staticmethod
     def _try_parse_json(text: str) -> Optional[Dict]:
@@ -649,7 +649,7 @@ class CrisisWorldReward:
             if atype == self._INVALID_JSON:
                 self._json_invalid_count += 1
                 # Stronger format penalty so json_valid converges to >97%.
-                penalty = -35.0 + random.uniform(-2.0, 2.0)
+                penalty = -45.0 + random.uniform(-2.0, 2.0)
                 print(f"    [{idx}] ❌ INVALID JSON  → reward={penalty:.1f}")
                 rewards.append(penalty)
                 self.episode_rewards.append(penalty)
@@ -667,7 +667,7 @@ class CrisisWorldReward:
                 # FIX 4: NO auto-repair — force model to learn correct format.
                 # Hard penalty and skip episode so GRPO sees a clear signal.
                 self._json_invalid_count += 1
-                penalty = -80.0 + random.uniform(-2.0, 2.0)
+                penalty = -95.0 + random.uniform(-2.0, 2.0)
                 print(f"    [{idx}] ⚠ ILLEGAL ACTION → reward={penalty:.1f}  "
                       f"(no repair — model must learn)")
                 rewards.append(penalty)
@@ -753,7 +753,7 @@ class CrisisWorldReward:
             total = 0.0
 
             # 1. Format prior: valid structured outputs get meaningful advantage.
-            total += 20.0 if valid_json else -30.0
+            total += 16.0 if valid_json else -35.0
 
             # 2. Environment outcome
             # Hackathon rubric: reward must be hard to game — wrong-role broadcast
@@ -761,25 +761,25 @@ class CrisisWorldReward:
             life_mult = 1.0
             if atype == "broadcast" and not is_comm_agent:
                 life_mult = 0.15
-            total += lives_saved * 1.0 * life_mult
-            total -= deaths_delta * 10.0
-            total -= max(0.0, panic_delta) * 2.0
+            total += lives_saved * 1.8 * life_mult
+            total -= deaths_delta * 16.0
+            total -= max(0.0, panic_delta) * 3.0
 
             # 3. Role-aligned shaping — judges expect non-comms to execute, not spam broadcast
             if atype == "broadcast":
                 if is_comm_agent:
                     total += 10.0
-                    total += _clip_env_comm_term(env_comm_bonus_sum, 24.0)
+                    total += _clip_env_comm_term(env_comm_bonus_sum, 16.0)
                 else:
-                    total -= 55.0
+                    total -= 70.0
                 self._batch_broadcasters += 1
                 if self._batch_broadcasters > 1:
                     total -= 5.0 * (self._batch_broadcasters - 1)
             else:
-                total += 14.0
-                total += _clip_env_comm_term(env_comm_bonus_sum, 25.0)
+                total += 10.0
+                total += _clip_env_comm_term(env_comm_bonus_sum, 16.0)
                 if coord_hit_steps > 0:
-                    total += 12.0
+                    total += 4.0
 
             # 4. Chain — prior completion was broadcast, this one is operational
             chain_bonus = 0.0
@@ -788,7 +788,7 @@ class CrisisWorldReward:
                 and atype != "broadcast"
                 and valid_json
             ):
-                chain_bonus = 30.0
+                chain_bonus = 12.0
                 total += chain_bonus
             self._prev_completion_action = atype
 

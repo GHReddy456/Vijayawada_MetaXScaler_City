@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Activity, Play, Pause, Square, RotateCcw, Wifi, WifiOff, Film } from 'lucide-react';
 import { useStore } from '../store/store';
 
-const API = 'http://localhost:8000';
+const API = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? window.location.origin;
 
 function formatTime(secs: number): string {
   const h = Math.floor(secs / 3600);

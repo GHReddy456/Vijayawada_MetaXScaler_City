@@ -31,12 +31,11 @@ if (-not $RepoId) {
 }
 
 $token = $env:HF_TOKEN
-if (-not $token) {
-    Write-Error "Set HF_TOKEN to a Hugging Face access token (write permission)."
-}
 
 hf version | Out-Host
-hf auth login --token $token
+if ($token) {
+    hf auth login --token $token
+}
 
 hf repos create $RepoId --repo-type space --space-sdk docker --exist-ok
 
@@ -54,6 +53,17 @@ if (Test-Path (Join-Path $Root "LICENSE")) {
     Copy-Item (Join-Path $Root "LICENSE") $Stage -Force
 }
 
+# Frontend build inputs required by Docker multi-stage build
+foreach ($f in @("package.json", "index.html", "vite.config.ts", "tsconfig.json", "tsconfig.app.json", "tsconfig.node.json")) {
+    $src = Join-Path $Root $f
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $Stage $f) -Force
+    }
+}
+if (Test-Path (Join-Path $Root "src")) {
+    Copy-Item (Join-Path $Root "src") (Join-Path $Stage "src") -Recurse -Force
+}
+
 if (-not $SkipReadme) {
     $card = Join-Path $PSScriptRoot "huggingface_space\SPACE_README.md"
     if (Test-Path $card) {
@@ -66,7 +76,7 @@ $dstBackend = Join-Path $Stage "backend"
 New-Item -ItemType Directory -Path $dstBackend -Force | Out-Null
 robocopy $srcBackend $dstBackend /E `
     /XD node_modules .venv __pycache__ .mypy_cache .pytest_cache wandb runs checkpoints outputs .git .ruff_cache .eggs dist build .tox htmlcov `
-    /XF *.pyc `
+    /XF *.pyc .env .env.* `
     /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Host
 if ($LASTEXITCODE -gt 7) {
     throw "robocopy failed with exit code $LASTEXITCODE"
@@ -75,45 +85,43 @@ if ($LASTEXITCODE -gt 7) {
 $uploadArgs = @(
     "upload", $RepoId, $Stage, ".",
     "--repo-type", "space",
-    "--token", $token,
-    "--commit-message", "Deploy CrisisWorld OpenEnv Docker Space (minimal + template cleanup)"
+    "--commit-message", "Deploy CrisisWorld OpenEnv Docker Space (minimal upload)"
 )
-
-if (-not $SkipHubCleanup) {
-    $uploadArgs += @(
-        "--delete", "node_modules/**",
-        "--delete", "**/node_modules/**",
-        "--delete", "package.json",
-        "--delete", "package-lock.json",
-        "--delete", "pnpm-lock.yaml",
-        "--delete", "yarn.lock",
-        "--delete", "index.html",
-        "--delete", "vite.config.ts",
-        "--delete", "vite.config.js",
-        "--delete", "tailwind.config.js",
-        "--delete", "tailwind.config.ts",
-        "--delete", "postcss.config.js",
-        "--delete", "tsconfig.json",
-        "--delete", "tsconfig.app.json",
-        "--delete", "tsconfig.node.json",
-        "--delete", "app.py",
-        "--delete", "app.R",
-        "--delete", "ui.R",
-        "--delete", "server.R",
-        "--delete", "renv.lock",
-        "--delete", "install.R",
-        "--delete", "requirements.txt",
-        "--delete", "runtime.txt",
-        "--delete", "Procfile",
-        "--delete", ".streamlit/**"
-    )
+if ($token) {
+    $uploadArgs += @("--token", $token)
 }
 
 & hf @uploadArgs
 
+if (-not $SkipHubCleanup) {
+    $cleanupArgs = @(
+        "repos", "delete-files", $RepoId,
+        "node_modules/",
+        "app.py",
+        "app.R",
+        "ui.R",
+        "server.R",
+        "renv.lock",
+        "install.R",
+        "runtime.txt",
+        "Procfile",
+        ".streamlit/",
+        "--repo-type", "space",
+        "--commit-message", "Cleanup legacy template/frontend files"
+    )
+    if ($token) {
+        $cleanupArgs += @("--token", $token)
+    }
+    & hf @cleanupArgs
+}
+
 Write-Host ""
 Write-Host "Space metadata (sdk should be docker):"
-hf spaces info $RepoId --expand sdk,runtime,subdomain --format json --token $token | Out-Host
+if ($token) {
+    hf spaces info $RepoId --expand sdk,runtime,subdomain --format json --token $token | Out-Host
+} else {
+    hf spaces info $RepoId --expand sdk,runtime,subdomain --format json | Out-Host
+}
 
 $url = 'https://huggingface.co/spaces/' + $RepoId
 $docsUrl = $url.TrimEnd('/') + '/docs'

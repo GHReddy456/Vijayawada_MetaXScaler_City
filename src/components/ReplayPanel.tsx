@@ -16,7 +16,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { AreaChart, Area, ResponsiveContainer, Tooltip } from 'recharts';
 import { Play, Loader, TrendingUp, TrendingDown, Minus, ChevronDown, ChevronUp } from 'lucide-react';
 
-const API = 'http://localhost:8000';
+const API = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? window.location.origin;
 
 interface EpisodeSummary {
   total_reward: number;

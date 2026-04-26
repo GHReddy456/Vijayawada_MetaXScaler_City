@@ -606,7 +606,7 @@ function SimulationCanvas() {
       ctx.textAlign = 'center';
       ctx.shadowColor = 'rgba(255,51,85,0.5)';
       ctx.shadowBlur = 10;
-      ctx.fillText('⚡  AWAITING BACKEND  ·  ws://localhost:8000/ws', W / 2, H / 2 + 24);
+      ctx.fillText('⚡  AWAITING BACKEND  ·  /ws', W / 2, H / 2 + 24);
       ctx.restore();
     }
 

@@ -2,12 +2,12 @@
 title: metaXscalar — Crisis Vijayawada (Panic City)
 emoji: 🌐
 colorFrom: blue
-colorTo: orange
+colorTo: purple
 sdk: docker
 app_port: 7860
 pinned: false
 license: mit
-short_description: Multi-agent disaster response demo — OpenEnv API (Docker). Vijayawada grid, panic & coordination.
+short_description: CrisisWorld OpenEnv Docker API for disaster-response agents.
 ---
 
 # metaXscalar — Crisis Vijayawada (Panic City)
