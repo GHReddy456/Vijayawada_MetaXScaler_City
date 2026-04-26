@@ -648,8 +648,8 @@ class CrisisWorldReward:
             # GRPO signal now comes purely from target quality.
             if atype == self._INVALID_JSON:
                 self._json_invalid_count += 1
-                # Stronger format penalty so json_valid converges to >97%.
-                penalty = -45.0 + random.uniform(-2.0, 2.0)
+                # Keep format quality high; low JSON validity sinks judge score.
+                penalty = -55.0 + random.uniform(-2.0, 2.0)
                 print(f"    [{idx}] ❌ INVALID JSON  → reward={penalty:.1f}")
                 rewards.append(penalty)
                 self.episode_rewards.append(penalty)
@@ -667,7 +667,8 @@ class CrisisWorldReward:
                 # FIX 4: NO auto-repair — force model to learn correct format.
                 # Hard penalty and skip episode so GRPO sees a clear signal.
                 self._json_invalid_count += 1
-                penalty = -95.0 + random.uniform(-2.0, 2.0)
+                # Illegal actions must be decisively dominated by valid options.
+                penalty = -120.0 + random.uniform(-2.0, 2.0)
                 print(f"    [{idx}] ⚠ ILLEGAL ACTION → reward={penalty:.1f}  "
                       f"(no repair — model must learn)")
                 rewards.append(penalty)
@@ -753,33 +754,36 @@ class CrisisWorldReward:
             total = 0.0
 
             # 1. Format prior: valid structured outputs get meaningful advantage.
-            total += 16.0 if valid_json else -35.0
+            total += 20.0 if valid_json else -40.0
 
             # 2. Environment outcome
             # Hackathon rubric: reward must be hard to game — wrong-role broadcast
             # should not capture full rescue credit (otherwise logistics/medical spam broadcast).
             life_mult = 1.0
             if atype == "broadcast" and not is_comm_agent:
-                life_mult = 0.15
-            total += lives_saved * 1.8 * life_mult
-            total -= deaths_delta * 16.0
-            total -= max(0.0, panic_delta) * 3.0
+                life_mult = 0.0
+            total += lives_saved * 2.6 * life_mult
+            total -= deaths_delta * 26.0
+            total -= max(0.0, panic_delta) * 5.0
+            # Extra convex risk penalty to prevent late-training collapse.
+            total -= 6.0 * (deaths_delta ** 2)
+            total -= 0.8 * (max(0.0, panic_delta) ** 2)
 
             # 3. Role-aligned shaping — judges expect non-comms to execute, not spam broadcast
             if atype == "broadcast":
                 if is_comm_agent:
-                    total += 10.0
-                    total += _clip_env_comm_term(env_comm_bonus_sum, 16.0)
+                    total += 6.0
+                    total += _clip_env_comm_term(env_comm_bonus_sum, 10.0)
                 else:
-                    total -= 70.0
+                    total -= 95.0
                 self._batch_broadcasters += 1
                 if self._batch_broadcasters > 1:
-                    total -= 5.0 * (self._batch_broadcasters - 1)
+                    total -= 8.0 * (self._batch_broadcasters - 1)
             else:
-                total += 10.0
-                total += _clip_env_comm_term(env_comm_bonus_sum, 16.0)
+                total += 8.0
+                total += _clip_env_comm_term(env_comm_bonus_sum, 8.0)
                 if coord_hit_steps > 0:
-                    total += 4.0
+                    total += 2.0
 
             # 4. Chain — prior completion was broadcast, this one is operational
             chain_bonus = 0.0
@@ -788,7 +792,7 @@ class CrisisWorldReward:
                 and atype != "broadcast"
                 and valid_json
             ):
-                chain_bonus = 12.0
+                chain_bonus = 4.0
                 total += chain_bonus
             self._prev_completion_action = atype
 
