@@ -432,8 +432,8 @@ class CrisisWorldReward:
         r = 0.0
 
         # ── Core outcomes ────────────────────────────────────────────────────
-        lives_saved = max(0.0, float(curr.get("rescue_success", 0)) - float(prev.get("rescue_success", 0)))
-        deaths      = max(0.0, float(curr.get("death_toll",      0)) - float(prev.get("death_toll",      0)))
+        lives_saved = max(0.0, float(curr.get("rescue_success_rate", 0.0)) - float(prev.get("rescue_success_rate", 0.0)))
+        deaths      = max(0.0, float(curr.get("deaths",            0.0)) - float(prev.get("deaths",            0.0)))
         r += 50.0 * lives_saved
         r -= 100.0 * deaths
 
@@ -637,10 +637,10 @@ class CrisisWorldReward:
                 curr_metrics = env.metrics()
                 info         = result.get("info", {})
 
-                lives_saved  += max(0, int(curr_metrics.get("rescue_success", 0))
-                                    - int(init_metrics.get("rescue_success", 0)))
-                deaths_delta += max(0, int(curr_metrics.get("death_toll",     0))
-                                    - int(init_metrics.get("death_toll",      0)))
+                lives_saved  += max(0, float(curr_metrics.get("rescue_success_rate", 0.0))
+                                    - float(init_metrics.get("rescue_success_rate", 0.0)))
+                deaths_delta += max(0, float(curr_metrics.get("deaths", 0.0))
+                                    - float(init_metrics.get("deaths",   0.0)))
                 panic_delta  += (float(curr_metrics.get("panic_level", 0.0))
                                  - float(init_metrics.get("panic_level", 0.0)))
                 init_metrics  = curr_metrics
@@ -705,7 +705,7 @@ class CrisisWorldReward:
 
             m = env.metrics()
             self.episode_rewards.append(total)
-            self.episode_deaths.append(int(m.get("death_toll", 0)))
+            self.episode_deaths.append(int(m.get("deaths", 0)))
             self.episode_coordination.append(float(m.get("coordination_score", 0.0)))
             self.episode_trust.append(float(m.get("trust_score", 0.0)))
             self.episode_panic.append(float(m.get("panic_level", 0.0)))
