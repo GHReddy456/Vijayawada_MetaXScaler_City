@@ -913,6 +913,23 @@ def verify_sampling(model: Any, tokenizer: Any, n: int = 4) -> None:
         print(f"  ✓ {unique_count} diverse outputs confirmed — GRPO will learn.\n")
 
 
+def _training_metric_sparkline(vals: List[float], width: int = 8) -> str:
+    """
+    Unicode mini-chart for logs. Module-level so GRPODebugCallback's dynamic
+    TrainerCallback subclass (which only copies a few methods) can use it via closure-free calls.
+    """
+    bars = " ▁▂▃▄▅▆▇█"
+    if len(vals) < 2:
+        return "—"
+    recent = vals[-width:]
+    lo, hi = min(recent), max(recent)
+    if hi == lo:
+        return bars[4] * len(recent)
+    return "".join(
+        bars[max(1, int((v - lo) / (hi - lo) * 8))] for v in recent
+    )
+
+
 # ─── PART 5 + Debug callback ─────────────────────────────────────────────────
 
 class GRPODebugCallback:
@@ -993,19 +1010,6 @@ class GRPODebugCallback:
     # Attach reward_fn after construction so on_log can read live metrics
     _reward_fn: Any = None
 
-    @staticmethod
-    def _sparkline(vals: List[float], width: int = 8) -> str:
-        bars = " ▁▂▃▄▅▆▇█"
-        if len(vals) < 2:
-            return "—"
-        recent = vals[-width:]
-        lo, hi = min(recent), max(recent)
-        if hi == lo:
-            return bars[4] * len(recent)
-        return "".join(
-            bars[max(1, int((v - lo) / (hi - lo) * 8))] for v in recent
-        )
-
     def on_log(
         self,
         args: Any,
@@ -1069,14 +1073,14 @@ class GRPODebugCallback:
             # Warm-up: only cumulative JSON rate available
             self._json_roll_hist.append(float(json_pct) * 100.0)
 
-        reward_spark = self._sparkline(self._reward_hist)
-        json_spark   = self._sparkline(self._json_roll_hist)
-        rescue_spark = self._sparkline(self._rescue_hist)
-        trust_spark  = self._sparkline(self._trust_hist)
-        coord_spark  = self._sparkline(self._coord_hist)
-        chain_spark  = self._sparkline(self._chain_hist)
-        death_spark  = self._sparkline(self._death_inv_hist)
-        panic_spark  = self._sparkline(self._panic_inv_hist)
+        reward_spark = _training_metric_sparkline(self._reward_hist)
+        json_spark   = _training_metric_sparkline(self._json_roll_hist)
+        rescue_spark = _training_metric_sparkline(self._rescue_hist)
+        trust_spark  = _training_metric_sparkline(self._trust_hist)
+        coord_spark  = _training_metric_sparkline(self._coord_hist)
+        chain_spark  = _training_metric_sparkline(self._chain_hist)
+        death_spark  = _training_metric_sparkline(self._death_inv_hist)
+        panic_spark  = _training_metric_sparkline(self._panic_inv_hist)
 
         window = self._reward_hist[-10:] if self._reward_hist else []
         roll10 = f"{sum(window)/len(window):.1f}" if window else "—"
