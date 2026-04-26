@@ -1032,14 +1032,12 @@ class GRPODebugCallback:
         rfn = getattr(self, "_reward_fn", None)
         if rfn is not None and hasattr(rfn, "rollout_before_after_report"):
             report = rfn.rollout_before_after_report()
-            print(report)
             try:
                 od = getattr(args, "output_dir", None)
                 if od:
                     p = Path(od) / "training_before_after.txt"
                     p.parent.mkdir(parents=True, exist_ok=True)
                     p.write_text(report + "\n", encoding="utf-8")
-                    print(f"[GRPODebugCallback] Wrote {p}")
             except OSError:
                 pass
         return control
@@ -1463,7 +1461,7 @@ def _save_artifacts(
 # ─── Artifact loader (used by server.py) ─────────────────────────────────────
 
 def load_training_artifacts(
-    output_dir: str = "checkpoints/crisisworld-grpo-final",
+    output_dir: str = "crisisworld-grpo-final-final",
 ) -> Dict[str, Any]:
     out = Path(output_dir)
     payload: Dict[str, Any] = {"output_dir": output_dir, "available": {}}

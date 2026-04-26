@@ -1,0 +1,19 @@
+{
+  "model_name": "Qwen/Qwen2.5-0.5B-Instruct",
+  "level": 1,
+  "samples": 256,
+  "output_dir": "checkpoints/crisisworld-grpo-final-final",
+  "total_episodes": 1000,
+  "final_reward": 19.42180077322382,
+  "final_deaths": 0,
+  "final_trust": 80.0,
+  "final_panic": 15.0,
+  "coordination_rate": 0.626,
+  "json_validity": 0.824,
+  "reward_stats": {
+    "mean": -67.23,
+    "stdev": 174.38,
+    "min": -1014.29,
+    "max": 170.05
+  }
+}

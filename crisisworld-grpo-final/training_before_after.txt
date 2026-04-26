@@ -1,0 +1,14 @@
+
+============================================================
+  BEFORE vs AFTER TRAINING (same metrics, early vs late rollouts)
+============================================================
+  Rollouts: first 40 vs last 40  (total completed: 1000)
+
+  json_ok_rate            early=   72.50%  late=   85.00%  → improved ✓
+  rescue_success_%        early=    0.62  late=    0.45  → worse ✗
+  trust_score             early=   58.12  late=   68.16  → improved ✓
+  coord_score_%           early=    9.31  late=    7.06  → worse ✗
+  chain_bonus_hit_%       early=    5.00%  late=    2.50%  → worse ✗
+  deaths (lower better)   early=    0.12  late=    0.47  → worse ✗
+  panic (lower better)    early=    3.82  late=   12.88  → worse ✗
+============================================================
