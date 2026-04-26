@@ -36,6 +36,7 @@ class OllamaPolicy:
         self.last_action_cache: Dict[str, Dict[str, Any]] = {}
         self.hf_token = (
             os.getenv("HF_API_TOKEN")
+            or os.getenv("HF_TOKEN")
             or os.getenv("HUGGINGFACEHUB_API_TOKEN")
             or os.getenv("HUGGINGFACE_API_TOKEN")
         )

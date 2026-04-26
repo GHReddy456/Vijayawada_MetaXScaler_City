@@ -1,0 +1,12 @@
+.git
+.github
+**/__pycache__
+**/*.pyc
+**/node_modules
+**/dist
+backend/checkpoints
+backend/**/*.pt
+**/.env
+**/.venv
+**/agent-transcripts
+.cursor

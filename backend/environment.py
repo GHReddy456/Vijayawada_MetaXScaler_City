@@ -646,6 +646,7 @@ class CrisisWorldEnv:
             "agent_trust": dict(self.agent_trust),
             "comm_links": self._last_comm_links,
             "comm_reward_deltas": comm_reward_deltas,
+            "comm_reward_bonus": float(comm_reward_bonus),
             "validation_feedback": {"valid": True, "violations": []},
         }
 

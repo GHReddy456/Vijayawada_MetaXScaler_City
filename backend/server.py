@@ -1112,7 +1112,12 @@ async def replay_episodes(level: int = 2, steps: int = 30) -> Dict[str, Any]:
 @app.get("/llm/status")
 async def llm_status() -> Dict[str, Any]:
     """Return current LLM backend configuration."""
-    token = os.getenv("HF_API_TOKEN", "")
+    token = (
+        os.getenv("HF_API_TOKEN")
+        or os.getenv("HF_TOKEN")
+        or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+        or ""
+    )
     model = os.getenv("HF_MODEL_ID", "meta-llama/Llama-3.1-8B-Instruct")
     token_preview = f"{token[:8]}...{token[-4:]}" if len(token) > 12 else ("SET" if token else "MISSING")
     return {
@@ -1189,3 +1194,10 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             connected_websockets.remove(ws)
         await ws.close(code=1011)
 
+
+# ── Hugging Face / production: serve Vite build from backend/static ───────────
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_static_dir):
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="spa")

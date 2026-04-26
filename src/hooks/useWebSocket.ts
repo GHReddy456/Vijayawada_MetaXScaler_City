@@ -1,8 +1,19 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '../store/store';
 
-const WS_URL = 'ws://localhost:8000/ws';
-const HTTP_SNAPSHOT_URL = 'http://localhost:8000/snapshot';
+function wsUrl(): string {
+  if (import.meta.env.VITE_WS_URL) {
+    return import.meta.env.VITE_WS_URL as string;
+  }
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}/ws`;
+}
+function snapshotUrl(): string {
+  if (import.meta.env.VITE_API_URL) {
+    return `${import.meta.env.VITE_API_URL.replace(/\/$/, '')}/snapshot`;
+  }
+  return `${window.location.origin}/snapshot`;
+}
 const BASE_RECONNECT_MS = 2000;
 const MAX_RECONNECT_MS  = 30000;
 
@@ -19,7 +30,7 @@ export function useWebSocket() {
 
     const bootstrapSnapshot = async () => {
       try {
-        const res = await fetch(HTTP_SNAPSHOT_URL);
+        const res = await fetch(snapshotUrl());
         if (!res.ok) return;
         const data = await res.json();
         if (mounted.current) {
@@ -34,7 +45,8 @@ export function useWebSocket() {
       if (!mounted.current) return;
 
       try {
-        const ws = new WebSocket(WS_URL);
+        const url = wsUrl();
+        const ws = new WebSocket(url);
         wsRef.current = ws;
 
         ws.onopen = () => {
@@ -42,7 +54,7 @@ export function useWebSocket() {
           attempts.current = 0;
           setWsConnected(true);
           setWsError(null);
-          console.info('[WS] Connected →', WS_URL);
+          console.info('[WS] Connected →', url);
         };
 
         ws.onmessage = (ev) => {
