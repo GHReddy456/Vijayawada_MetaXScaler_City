@@ -884,6 +884,21 @@ class GRPODebugCallback:
     # Attach reward_fn after construction so on_log can read live metrics
     _reward_fn: Any = None
 
+    def __init_subclass_post__(self) -> None:
+        pass
+
+    @property
+    def _reward_history(self) -> List[float]:
+        if not hasattr(self, "_reward_history_data"):
+            self._reward_history_data: List[float] = []
+        return self._reward_history_data
+
+    @property
+    def _json_history(self) -> List[float]:
+        if not hasattr(self, "_json_history_data"):
+            self._json_history_data: List[float] = []
+        return self._json_history_data
+
     def on_log(
         self,
         args: Any,
@@ -908,14 +923,40 @@ class GRPODebugCallback:
         panic_last   = "—"
         coord_rate   = "—"
         json_valid   = "—"
+        json_pct     = None
         rfn = self._reward_fn
         if rfn is not None:
             coord_rate  = f"{rfn.coordination_rate():.3f}"
-            json_valid  = f"{rfn.json_validity_rate():.1%}"
+            json_pct    = rfn.json_validity_rate()
+            json_valid  = f"{json_pct:.1%}"
             if rfn.episode_deaths:
                 deaths_last = rfn.episode_deaths[-1]
             if rfn.episode_panic:
                 panic_last = f"{rfn.episode_panic[-1]:.1f}"
+
+        # Rolling history for trend display
+        if isinstance(r, (int, float)):
+            self._reward_history.append(float(r))   # property returns the list
+        if json_pct is not None:
+            self._json_history.append(float(json_pct) * 100.0)
+
+        # Build 8-point sparkline from recent reward history
+        def _sparkline(vals: List[float], width: int = 8) -> str:
+            bars = " ▁▂▃▄▅▆▇█"
+            if len(vals) < 2:
+                return "—"
+            recent = vals[-width:]
+            lo, hi = min(recent), max(recent)
+            if hi == lo:
+                return bars[4] * len(recent)
+            return "".join(bars[max(1, int((v - lo) / (hi - lo) * 8))] for v in recent)
+
+        reward_spark   = _sparkline(self._reward_history)
+        json_spark     = _sparkline(self._json_history)
+
+        # Rolling 10-step average reward
+        window = self._reward_history[-10:] if self._reward_history else []
+        roll10 = f"{sum(window)/len(window):.1f}" if window else "—"
 
         std_flag = ""
         if isinstance(r_std, (int, float)):
@@ -926,12 +967,14 @@ class GRPODebugCallback:
             else:
                 std_flag = "  ✓"
 
-        # spec §7: one-line metric row every 5 steps
+        # spec §7: rich metric row every 5 steps
         print(
             f"\nstep={step:>4} | reward_mean={r} | reward_std={r_std}{std_flag}\n"
             f"         | deaths={deaths_last} | panic={panic_last} "
             f"| coord_rate={coord_rate} | json_valid={json_valid}\n"
-            f"         | loss={loss} | grad_norm={g_norm} | clip={clipped} | lr={lr}"
+            f"         | loss={loss} | grad_norm={g_norm} | clip={clipped} | lr={lr}\n"
+            f"         | rolling10_reward={roll10}  "
+            f"reward_trend=[{reward_spark}]  json_trend=[{json_spark}]"
         )
 
         # Safety early-stop if training stalls after step 200 (spec §6)
@@ -955,7 +998,7 @@ def train(
     samples:                     int   = 256,
     level:                       int   = 1,     # curriculum starts at 1 (spec §6)
     horizon:                     int   = 20,
-    learning_rate:               float = 5e-6,
+    learning_rate:               float = 2e-5,  # 4× bigger → visible loss ~1e-5, meaningful weight updates
     num_train_epochs:            int   = 1,
     num_generations:             int   = 4,      # required for GRPO
     per_device_train_batch_size: int   = 1,
