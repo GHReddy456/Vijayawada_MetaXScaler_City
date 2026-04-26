@@ -526,15 +526,15 @@ class CrisisWorldReward:
     def _curriculum_level(self) -> int:
         """
         Curriculum by rollout count (slow ramp for stable early rewards):
-          0–119 → level 1
-          119–279 → level 2
-          280+ → level 3
+          0–179   → level 1
+          180–419 → level 2
+          420+    → level 3
         """
-        # Slower ramp → more early positive signal for judges (stays on easier levels longer).
+        # Hold easier levels longer so survival policy stabilizes before hardest scenarios.
         n = self._curriculum_step_total
-        if n < 120:
+        if n < 180:
             return 1
-        if n < 280:
+        if n < 420:
             return 2
         return 3
 
@@ -649,7 +649,7 @@ class CrisisWorldReward:
             if atype == self._INVALID_JSON:
                 self._json_invalid_count += 1
                 # Keep format quality high; low JSON validity sinks judge score.
-                penalty = -55.0 + random.uniform(-2.0, 2.0)
+                penalty = -55.0 + random.uniform(-0.5, 0.5)
                 print(f"    [{idx}] ❌ INVALID JSON  → reward={penalty:.1f}")
                 rewards.append(penalty)
                 self.episode_rewards.append(penalty)
@@ -668,7 +668,7 @@ class CrisisWorldReward:
                 # Hard penalty and skip episode so GRPO sees a clear signal.
                 self._json_invalid_count += 1
                 # Illegal actions must be decisively dominated by valid options.
-                penalty = -120.0 + random.uniform(-2.0, 2.0)
+                penalty = -120.0 + random.uniform(-0.5, 0.5)
                 print(f"    [{idx}] ⚠ ILLEGAL ACTION → reward={penalty:.1f}  "
                       f"(no repair — model must learn)")
                 rewards.append(penalty)
@@ -768,12 +768,20 @@ class CrisisWorldReward:
             # Extra convex risk penalty to prevent late-training collapse.
             total -= 6.0 * (deaths_delta ** 2)
             total -= 0.8 * (max(0.0, panic_delta) ** 2)
+            # Hard-stop guardrails: catastrophic outcomes must dominate reward signal.
+            if deaths_delta > 0.0:
+                total -= 90.0 + 20.0 * deaths_delta
+            if panic_delta > 1.0:
+                total -= 35.0 + 6.0 * (panic_delta - 1.0)
+            if lives_saved > 0.0 and deaths_delta <= 0.0:
+                total += 18.0
 
             # 3. Role-aligned shaping — judges expect non-comms to execute, not spam broadcast
             if atype == "broadcast":
                 if is_comm_agent:
-                    total += 6.0
-                    total += _clip_env_comm_term(env_comm_bonus_sum, 10.0)
+                    # No free broadcast reward: only pay for demonstrable positive comm effect.
+                    if env_comm_bonus_sum > 0.0:
+                        total += _clip_env_comm_term(env_comm_bonus_sum, 8.0)
                 else:
                     total -= 95.0
                 self._batch_broadcasters += 1
@@ -808,7 +816,7 @@ class CrisisWorldReward:
                 self._total_messages += sim_steps
                 self._successful_coord += coord_hit_steps
 
-            total += random.uniform(-2.0, 2.0)
+            total += random.uniform(-0.5, 0.5)
 
             print(
                 f"    [{idx}] reward = {total:.2f}  "
