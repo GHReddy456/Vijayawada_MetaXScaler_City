@@ -1,0 +1,8 @@
+# OpenEnv manifest — validates with: openenv validate (openenv-core CLI)
+# https://github.com/meta-pytorch/OpenEnv
+spec_version: 1
+name: crisisworld
+type: space
+runtime: fastapi
+app: openenv_crisisworld.app:app
+port: 7860

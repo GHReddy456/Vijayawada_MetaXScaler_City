@@ -1,0 +1,6 @@
+spec_version: 1
+name: crisisworld
+type: space
+runtime: fastapi
+app: openenv_crisisworld.app:app
+port: 7860

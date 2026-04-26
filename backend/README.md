@@ -1,6 +1,9 @@
-# CrisisWorld (OpenEnv-style RL Environment)
+# CrisisWorld (OpenEnv + FastAPI RL environment)
 
-Production-grade, multi-agent disaster simulation with strict action/observation schemas and FastAPI/WebSocket serving.
+Production-grade, multi-agent disaster simulation with strict action/observation schemas. Ships two servers:
+
+- **`server.py`** — original WebSocket + React UI API (port **8000**).
+- **`openenv_crisisworld.app:app`** — **OpenEnv** `create_app` entrypoint for Hugging Face Spaces / TRL clients (port **7860** in Docker).
 
 ## Files
 
@@ -17,11 +20,21 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run API server
+## Run API server (original UI + WebSocket)
 
 ```bash
 uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+## Run OpenEnv-compliant server (HF Space / judges)
+
+Requires `openenv-core` (included in `requirements.txt`).
+
+```bash
+uvicorn openenv_crisisworld.app:app --host 0.0.0.0 --port 7860
+```
+
+Manifest for `openenv validate` / `openenv push`: `openenv_crisisworld/openenv.yaml` (repo root also has `openenv.yaml`).
 
 ## Hugging Face Llama setup
 

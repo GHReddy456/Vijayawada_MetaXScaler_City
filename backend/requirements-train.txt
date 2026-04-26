@@ -12,3 +12,6 @@ peft>=0.10.0
 
 # ── Optional: Unsloth 4-bit acceleration (Linux + CUDA only) ─────────────────
 unsloth>=2025.1.0; platform_system == "Linux"
+
+# ── Training plots (reward / loss curves for README & judges) ────────────────
+matplotlib>=3.8.0

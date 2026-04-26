@@ -1,0 +1,74 @@
+{
+  "level": 1,
+  "max_steps": 40,
+  "n_seeds": 8,
+  "baseline_reward_mean": -349.223,
+  "improved_reward_mean": -207.619,
+  "mean_delta_reward": 141.604,
+  "rows": [
+    {
+      "seed": 1000,
+      "baseline_reward": -475.2525,
+      "improved_reward": -96.3125,
+      "delta_reward": 378.94,
+      "baseline_deaths": 4,
+      "improved_deaths": 1
+    },
+    {
+      "seed": 1001,
+      "baseline_reward": -239.64249999999998,
+      "improved_reward": -214.635,
+      "delta_reward": 25.007499999999993,
+      "baseline_deaths": 2,
+      "improved_deaths": 2
+    },
+    {
+      "seed": 1002,
+      "baseline_reward": -339.95,
+      "improved_reward": -293.01,
+      "delta_reward": 46.94,
+      "baseline_deaths": 3,
+      "improved_deaths": 3
+    },
+    {
+      "seed": 1003,
+      "baseline_reward": -339.9275,
+      "improved_reward": -303.8825,
+      "delta_reward": 36.045000000000016,
+      "baseline_deaths": 3,
+      "improved_deaths": 3
+    },
+    {
+      "seed": 1004,
+      "baseline_reward": -264.955,
+      "improved_reward": -221.81900000000002,
+      "delta_reward": 43.13599999999997,
+      "baseline_deaths": 2,
+      "improved_deaths": 2
+    },
+    {
+      "seed": 1005,
+      "baseline_reward": -385.56,
+      "improved_reward": -311.99749999999995,
+      "delta_reward": 73.56250000000006,
+      "baseline_deaths": 3,
+      "improved_deaths": 3
+    },
+    {
+      "seed": 1006,
+      "baseline_reward": -373.55749999999995,
+      "improved_reward": -73.195,
+      "delta_reward": 300.36249999999995,
+      "baseline_deaths": 3,
+      "improved_deaths": 2
+    },
+    {
+      "seed": 1007,
+      "baseline_reward": -374.9375,
+      "improved_reward": -146.1025,
+      "delta_reward": 228.835,
+      "baseline_deaths": 3,
+      "improved_deaths": 2
+    }
+  ]
+}

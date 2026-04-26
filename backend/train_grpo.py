@@ -180,6 +180,17 @@ def build_prompt_dataset(samples: int = 256, level: int = 2, seed: int = 123) ->
 
 # ─── PART 3: Stochastic fallback action (no static [5,5]) ────────────────────
 
+def _clip_env_comm_term(raw: float, cap: float = 28.0) -> float:
+    """
+    Map summed env `comm_reward_bonus` into [-cap, cap] for stable GRPO.
+
+    IMPORTANT: do NOT use `min(upper, raw * k)` for signed raw — when raw < 0,
+    Python's min picks the *more negative* value and blows up rewards (e.g. -400).
+    """
+    v = 0.12 * float(raw)
+    return max(-cap, min(cap, v))
+
+
 def _stochastic_fallback(agent_id: str) -> Dict[str, Any]:
     """Diverse fallback — avoid biasing every teammate toward broadcast."""
     allowed = list(_AGENT_ROLE_ACTIONS.get(agent_id, _VALID_ACTION_TYPES))
@@ -755,7 +766,7 @@ class CrisisWorldReward:
             if atype == "broadcast":
                 if is_comm_agent:
                     total += 10.0
-                    total += min(24.0, env_comm_bonus_sum * 3.0)
+                    total += _clip_env_comm_term(env_comm_bonus_sum, 24.0)
                 else:
                     total -= 42.0
                 self._batch_broadcasters += 1
@@ -763,7 +774,7 @@ class CrisisWorldReward:
                     total -= 5.0 * (self._batch_broadcasters - 1)
             else:
                 total += 14.0
-                total += min(20.0, env_comm_bonus_sum * 2.5)
+                total += _clip_env_comm_term(env_comm_bonus_sum, 25.0)
                 if coord_hit_steps > 0:
                     total += 12.0
 
